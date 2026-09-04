@@ -34,7 +34,18 @@ function nextRpcPort(instances: Instance[]): number {
 interface runtimeInfo { available: boolean; version: string; core_path?: string }
 
 interface KernelUpdateInfo { current_version: string; latest_version?: string | null; asset_name?: string | null; update_available: boolean; error?: string | null }
-interface KernelUpdateProgress { phase: string; downloaded_bytes: number; total_bytes?: number | null; percent?: number | null; current_file?: string | null; message: string; error?: string | null }
+interface KernelUpdateProgress { task_id?: string | null; phase: string; downloaded_bytes: number; total_bytes?: number | null; percent?: number | null; current_file?: string | null; message: string; error?: string | null }
+interface KernelUpdateTaskResponse { task_id?: string | null; status?: string; progress?: Partial<KernelUpdateProgress> | null; result?: Partial<KernelUpdateProgress> | null; error?: string | { message?: string } | null }
+const KERNEL_TERMINAL_PHASES = ['completed', 'failed'];
+const KERNEL_TERMINAL_STATUSES = ['completed', 'complete', 'success', 'succeeded', 'failed', 'error'];
+const isKernelTerminal = (value?: string | null): boolean => !!value && KERNEL_TERMINAL_STATUSES.includes(value.toLowerCase());
+const kernelErrorText = (error: KernelUpdateTaskResponse['error']): string | undefined => typeof error === 'string' ? error : error?.message;
+const mergeKernelProgress = (base: KernelUpdateProgress | null, update: Partial<KernelUpdateProgress> | null | undefined, taskId?: string | null): KernelUpdateProgress => ({
+  phase: update?.phase || base?.phase || 'checking', downloaded_bytes: update?.downloaded_bytes ?? base?.downloaded_bytes ?? 0,
+  total_bytes: update?.total_bytes ?? base?.total_bytes ?? null, percent: update?.percent ?? base?.percent ?? 0,
+  current_file: update?.current_file ?? base?.current_file ?? null, message: update?.message || base?.message || '正在更新内核',
+  error: update?.error ?? base?.error, task_id: update?.task_id ?? taskId ?? base?.task_id ?? null,
+});
 const KERNEL_PROXIES = [
   { value: 'direct', label: '直连' },
   { value: 'https://ghfast.top', label: 'https://ghfast.top/' },
@@ -91,6 +102,7 @@ export default function App() {
   const [serviceBusy, setServiceBusy] = useState(false);
   const serviceMode = service?.running === true && service?.healthy !== false;
   const logTimer = useRef<number | null>(null);
+  const kernelTaskId = kernelUpdate?.task_id ?? null;
 
   const current = useMemo(() => instances.find(i => i.id === activeId) ?? instances[0], [instances, activeId]);
 
@@ -119,9 +131,39 @@ export default function App() {
   useEffect(() => { localStorage.setItem('easytier.kernel-update-proxy.v1', JSON.stringify(kernelProxy)); }, [kernelProxy]);
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
-    void listen<KernelUpdateProgress>('kernel-update-progress', event => setKernelUpdate(event.payload)).then(fn => { unlisten = fn; });
+    void listen<KernelUpdateProgress>('kernel-update-progress', event => {
+      const payload = event.payload;
+      setKernelUpdate(currentProgress => {
+        if (!currentProgress) return currentProgress;
+        if (payload.task_id && currentProgress.task_id && payload.task_id !== currentProgress.task_id) return currentProgress;
+        const next = mergeKernelProgress(currentProgress, payload, currentProgress.task_id);
+        return next;
+      });
+    }).then(fn => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, []);
+  useEffect(() => {
+    if (!kernelTaskId || !kernelUpdate || KERNEL_TERMINAL_PHASES.includes(kernelUpdate.phase)) return;
+    let alive = true;
+    let timer: number | null = null;
+    const poll = async () => {
+      try {
+        const response = await serviceRequest<KernelUpdateTaskResponse>('get_task_status', { task_id: kernelTaskId });
+        if (!alive || response.task_id && response.task_id !== kernelTaskId) return;
+        const update = response.progress || response.result;
+        const status = response.status?.toLowerCase();
+        const terminal = isKernelTerminal(status) || isKernelTerminal(update?.phase);
+        const phase = terminal ? (status === 'failed' || status === 'error' || update?.phase === 'failed' ? 'failed' : 'completed') : update?.phase;
+        const next = mergeKernelProgress(kernelUpdate, { ...update, ...(phase ? { phase } : {}), ...(kernelErrorText(response.error) ? { error: kernelErrorText(response.error) } : {}) }, kernelTaskId);
+        setKernelUpdate(next);
+        if (!terminal && alive) timer = window.setTimeout(() => void poll(), 1000);
+      } catch {
+        if (alive) timer = window.setTimeout(() => void poll(), 1500);
+      }
+    };
+    void poll();
+    return () => { alive = false; if (timer != null) window.clearTimeout(timer); };
+  }, [serviceMode, kernelTaskId, kernelUpdate?.phase]);
   useEffect(() => {
     void invoke<KernelUpdateInfo>('check_kernel_update', { proxy: kernelProxy }).then(setKernelInfo).catch(e => setKernelInfo({ current_version: runtime?.version ?? 'unknown', update_available: false, error: String(e) }));
   // Runtime detection and the initial update check intentionally run once per app launch.
@@ -355,14 +397,27 @@ export default function App() {
     const runningInstances = instances.filter(i => i.status === 'running').map(i => ({ id: i.id, config: encodeTOML(i.config), rpc_port: i.rpcPort }));
     setKernelUpdate({ phase: 'checking', downloaded_bytes: 0, total_bytes: null, percent: 0, message: '正在准备更新' });
     try {
+      let serviceTaskTerminal = false;
       if (serviceMode) {
-        await serviceRequest('update_kernel', { proxy: kernelProxy });
+        const response = await serviceRequest<KernelUpdateTaskResponse>('update_kernel', { proxy: kernelProxy });
+        const taskId = response.task_id;
+        const update = response.progress || response.result;
+        const status = response.status?.toLowerCase();
+        serviceTaskTerminal = isKernelTerminal(status) || isKernelTerminal(update?.phase);
+        const phase = serviceTaskTerminal ? (status === 'failed' || status === 'error' || update?.phase === 'failed' ? 'failed' : 'completed') : update?.phase;
+        setKernelUpdate(currentProgress => mergeKernelProgress(currentProgress, {
+          ...update,
+          ...(phase ? { phase } : {}),
+          ...(kernelErrorText(response.error) ? { error: kernelErrorText(response.error) } : {}),
+        }, taskId));
       } else {
         await invoke<KernelUpdateInfo>('update_kernel', { proxy: kernelProxy, instances: runningInstances });
       }
-      setKernelInfo(await invoke<KernelUpdateInfo>('check_kernel_update', { proxy: kernelProxy }));
-      if (serviceMode) await refreshService();
-      else setInstances(xs => xs.map(i => runningInstances.some(r => r.id === i.id) ? { ...i, status: 'running' } : i));
+      if (!serviceMode || serviceTaskTerminal) {
+        setKernelInfo(await invoke<KernelUpdateInfo>('check_kernel_update', { proxy: kernelProxy }));
+        if (serviceMode) await refreshService();
+        else setInstances(xs => xs.map(i => runningInstances.some(r => r.id === i.id) ? { ...i, status: 'running' } : i));
+      }
     } catch (e) {
       setKernelUpdate({ phase: 'failed', downloaded_bytes: 0, total_bytes: null, percent: 0, message: '内核更新失败', error: String(e) });
     }

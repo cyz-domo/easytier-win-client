@@ -196,8 +196,13 @@ fn install_service() -> Result<String, String> {
         let dir = exe.parent().ok_or_else(|| "service_path_invalid: executable has no parent".to_string())?;
         let candidates = [dir.join("easytier-service.exe"), dir.join("resources/easytier-service.exe")];
         let service = candidates.iter().find(|path| path.exists()).ok_or_else(|| format!("service_exe_not_found: {}", candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")))?;
+        let current_sid = std::env::var("USERNAME").ok().and_then(|name| {
+            let output = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", "(New-Object System.Security.Principal.NTAccount($env:USERNAME)).Translate([System.Security.Principal.SecurityIdentifier]).Value"]).output().ok()?;
+            if output.status.success() { Some(String::from_utf8_lossy(&output.stdout).trim().to_string()) } else { let _ = name; None }
+        }).filter(|sid| sid.starts_with("S-"));
+        let trusted_sid = current_sid.ok_or_else(|| "service_install_failed: cannot resolve interactive user SID".to_string())?;
         let service_path = service.display().to_string().replace('"', "\\\"");
-        let command = format!("$ErrorActionPreference='Stop'; $p='{}'; $bin='\\\"'+$p+'\\\"'; & sc.exe stop EasyTierService 2>$null; & sc.exe create EasyTierService binPath= $bin start= auto DisplayName= 'EasyTier Service'; if ($LASTEXITCODE -ne 0) {{ & sc.exe config EasyTierService binPath= $bin start= auto; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }} }}; & sc.exe description EasyTierService 'EasyTier background service'; & sc.exe start EasyTierService; exit $LASTEXITCODE", service_path);
+        let command = format!("$ErrorActionPreference='Stop'; $p='{}'; $bin='\\\"'+$p+'\\\" --interactive-user-sid={}' ; & sc.exe stop EasyTierService 2>$null; & sc.exe create EasyTierService binPath= $bin start= auto DisplayName= 'EasyTier Service'; if ($LASTEXITCODE -ne 0) {{ & sc.exe config EasyTierService binPath= $bin start= auto; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }} }}; & sc.exe description EasyTierService 'EasyTier background service'; & sc.exe start EasyTierService; exit $LASTEXITCODE", service_path, trusted_sid);
         let status = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &format!("Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile','-NonInteractive','-Command','{}'", command.replace('\'', "''"))])
             .status().map_err(|e| format!("service_install_failed: {e}"))?;

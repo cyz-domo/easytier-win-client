@@ -110,8 +110,17 @@ fn validate_archive(path: &Path, target: &Path) -> Result<(), String> {
 }
 
 pub fn download_and_stage(app: &AppHandle, proxy: &str, runtime_dir: &Path) -> Result<PathBuf, String> {
+    download_and_stage_with_progress(proxy, runtime_dir, |phase, message, downloaded, total, file, error| {
+        emit_progress(app, phase, message, downloaded, total, file, error);
+    })
+}
+
+pub fn download_and_stage_with_progress<F>(proxy: &str, runtime_dir: &Path, mut progress: F) -> Result<PathBuf, String>
+where
+    F: FnMut(&str, String, u64, Option<u64>, Option<String>, Option<String>),
+{
     let client = Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
-    emit_progress(app, "checking", "正在获取最新内核信息", 0, None, None, None);
+    progress("checking", "正在获取最新内核信息".into(), 0, None, None, None);
     let release = fetch_release(&client, proxy)?;
     if release.draft || release.prerelease { return Err("GitHub 最新版本不是正式 Release".into()); }
     let version = release_version(&release.tag_name);
@@ -134,11 +143,11 @@ pub fn download_and_stage(app: &AppHandle, proxy: &str, runtime_dir: &Path) -> R
         if n == 0 { break; }
         output.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         downloaded += n as u64;
-        emit_progress(app, "downloading", format!("已下载 {downloaded} 字节"), downloaded, total, Some(asset.name.clone()), None);
+        progress("downloading", format!("已下载 {downloaded} 字节"), downloaded, total, Some(asset.name.clone()), None);
     }
     drop(output);
     let staged = temp.join("core");
-    emit_progress(app, "extracting", "正在校验并解压内核", downloaded, total, None, None);
+    progress("extracting", "正在校验并解压内核".into(), downloaded, total, None, None);
     validate_archive(&zip_path, &staged)?;
     Ok(staged)
 }
