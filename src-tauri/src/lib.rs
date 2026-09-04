@@ -12,7 +12,20 @@ pub struct RuntimeInfo { pub core_path: String, pub cli_path: String, pub versio
 #[derive(Default)]
 pub struct RuntimeProcesses { children: HashMap<String, Child> }
 
-fn paths(runtime_dir: Option<String>) -> (PathBuf, PathBuf) { let d = runtime_dir.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("core")); (d.join("easytier-core.exe"), d.join("easytier-cli.exe")) }
+fn runtime_dir(runtime_dir: Option<String>) -> PathBuf {
+    if let Some(d) = runtime_dir { return PathBuf::from(d); }
+    let mut candidates = vec![PathBuf::from("core"), PathBuf::from("../core"), PathBuf::from("../../core")];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("core"));
+            candidates.push(dir.join("../core"));
+            candidates.push(dir.join("../../../core"));
+        }
+    }
+    for c in candidates { if c.join("easytier-core.exe").exists() { return c; } }
+    PathBuf::from("core")
+}
+fn paths(dir_override: Option<String>) -> (PathBuf, PathBuf) { let d = runtime_dir(dir_override); (d.join("easytier-core.exe"), d.join("easytier-cli.exe")) }
 #[tauri::command]
 fn detect_runtime(runtime_dir: Option<String>) -> RuntimeInfo { let (core, cli) = paths(runtime_dir); let version = Command::new(&core).arg("--version").output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_else(|| "unknown".into()).trim().to_string(); RuntimeInfo { core_path: core.display().to_string(), cli_path: cli.display().to_string(), version, available: core.exists() && cli.exists() } }
 #[tauri::command]
