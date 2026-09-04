@@ -1,8 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod config_store;
+mod ipc;
+mod runtime_manager;
 mod kernel_updater;
 use kernel_updater::KernelUpdateInfo;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::PathBuf, process::{Child, Command, Stdio}, sync::Mutex};
+use serde_json::Value;
+use std::{collections::HashMap, fs, io::{BufRead, BufReader, Write}, path::PathBuf, process::{Child, Command, Stdio}, sync::Mutex};
+#[cfg(windows)]
+use named_pipe::PipeClient;
 use tauri::{Manager, WindowEvent};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -161,6 +167,54 @@ fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<String, Str
         Err(e) => Err(e.to_string()),
     }
 }
+#[tauri::command]
+fn service_request(request: Value) -> Result<Value, String> {
+    let bytes = serde_json::to_vec(&request).map_err(|e| format!("invalid_request: {e}"))?;
+    if bytes.len() > ipc::MAX_MESSAGE { return Err("message_too_large".into()); }
+    #[cfg(windows)] {
+        let mut pipe = PipeClient::connect(r"\\.\pipe\EasyTierService").map_err(|e| format!("service_unavailable: {e}"))?;
+        pipe.write_all(&bytes).and_then(|_| pipe.write_all(b"\n")).map_err(|e| format!("service_unavailable: {e}"))?;
+        let mut line = Vec::new();
+        BufReader::new(pipe).read_until(b'\n', &mut line).map_err(|e| format!("service_unavailable: {e}"))?;
+        if line.len() > ipc::MAX_MESSAGE { return Err("message_too_large".into()); }
+        serde_json::from_slice(&line).map_err(|e| format!("invalid_response: {e}"))
+    }
+    #[cfg(not(windows))] { let _ = request; Err("service_unavailable: Windows service is unavailable on this platform".into()) }
+}
+
+#[cfg(windows)]
+fn scm_command(args: &[&str], code: &str) -> Result<String, String> {
+    let output = Command::new("sc.exe").args(args).output().map_err(|e| format!("{code}: {e}"))?;
+    if output.status.success() { Ok(String::from_utf8_lossy(&output.stdout).into_owned()) }
+    else { let detail = String::from_utf8_lossy(&output.stderr).trim().to_string(); Err(format!("{code}: {}", if detail.is_empty() { "SCM operation failed" } else { &detail })) }
+}
+
+#[tauri::command]
+fn install_service() -> Result<String, String> {
+    #[cfg(windows)] {
+        let exe = std::env::current_exe().map_err(|e| format!("service_path_invalid: {e}"))?;
+        let dir = exe.parent().ok_or_else(|| "service_path_invalid: executable has no parent".to_string())?;
+        let candidates = [dir.join("easytier-service.exe"), dir.join("resources/easytier-service.exe")];
+        let service = candidates.iter().find(|path| path.exists()).ok_or_else(|| format!("service_exe_not_found: {}", candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")))?;
+        let service_path = service.display().to_string().replace('"', "\\\"");
+        let command = format!("$ErrorActionPreference='Stop'; $p='{}'; $bin='\\\"'+$p+'\\\"'; & sc.exe stop EasyTierService 2>$null; & sc.exe create EasyTierService binPath= $bin start= auto DisplayName= 'EasyTier Service'; if ($LASTEXITCODE -ne 0) {{ & sc.exe config EasyTierService binPath= $bin start= auto; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }} }}; & sc.exe description EasyTierService 'EasyTier background service'; & sc.exe start EasyTierService; exit $LASTEXITCODE", service_path);
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &format!("Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile','-NonInteractive','-Command','{}'", command.replace('\'', "''"))])
+            .status().map_err(|e| format!("service_install_failed: {e}"))?;
+        if status.success() { Ok("后台服务已安装并启动".into()) } else { Err("service_install_failed: UAC 被拒绝或 SCM 操作失败".into()) }
+    }
+    #[cfg(not(windows))] { Err("service_unavailable: Windows SCM is unavailable on this platform".into()) }
+}
+
+#[tauri::command]
+fn start_service() -> Result<String, String> {
+    #[cfg(windows)] { scm_command(&["start", "EasyTierService"], "service_start_failed") }
+    #[cfg(not(windows))] { Err("service_unavailable: Windows SCM is unavailable on this platform".into()) }
+}
+
+#[tauri::command]
+fn repair_service() -> Result<String, String> { install_service() }
+
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(RuntimeProcesses::default()))
@@ -191,7 +245,7 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![detect_runtime, get_instance_state, start_instance, wait_for_exit, check_kernel_update, update_kernel, stop_instance, is_port_in_use, run_cli])
+        .invoke_handler(tauri::generate_handler![detect_runtime, get_instance_state, start_instance, wait_for_exit, check_kernel_update, update_kernel, stop_instance, is_port_in_use, run_cli, service_request, install_service, start_service, repair_service])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -5,6 +5,7 @@ import { defaultConfig, listenersForInstance, NetworkConfig, validateConfig } fr
 import { decodeTOML, encodeTOML } from './toml-codec';
 import { ConfigEditor } from './ConfigEditor';
 import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, latencyTone, parseNodeJSON, parsePeerJSON, parseRouteJSON, routeTone } from './status-data';
+import { getServiceStatus, serviceRequest, ServiceInstanceState, ServiceStatus } from './service-client';
 
 type Status = 'running' | 'stopped' | 'starting' | 'stopping' | 'failed';
 type Tab = 'status' | 'peers' | 'routes' | 'config' | 'logs' | 'settings';
@@ -15,6 +16,9 @@ interface Instance {
   status: Status;
   rpcPort: number;
   config: NetworkConfig;
+  autoStart?: boolean;
+  desiredState?: 'stopped' | 'running';
+  lastError?: string | null;
 }
 
 const load = <T,>(k: string, d: T): T => {
@@ -83,6 +87,9 @@ export default function App() {
   const [kernelUpdate, setKernelUpdate] = useState<KernelUpdateProgress | null>(null);
   const [kernelInfo, setKernelInfo] = useState<KernelUpdateInfo | null>(null);
   const [kernelProxy, setKernelProxy] = useState<string>(() => load('easytier.kernel-update-proxy.v1', 'direct'));
+  const [service, setService] = useState<ServiceStatus | null>(null);
+  const [serviceBusy, setServiceBusy] = useState(false);
+  const serviceMode = service?.running === true && service?.healthy !== false;
   const logTimer = useRef<number | null>(null);
 
   const current = useMemo(() => instances.find(i => i.id === activeId) ?? instances[0], [instances, activeId]);
@@ -90,6 +97,22 @@ export default function App() {
   useEffect(() => { localStorage.setItem('easytier.instances.v2', JSON.stringify(instances)); }, [instances]);
   useEffect(() => { if (current) localStorage.setItem('easytier.active.v2', current.id); }, [current]);
   useEffect(() => { invoke<runtimeInfo>('detect_runtime', {}).then(v => setRuntime({ ...v, core_path: v.core_path ?? 'core/easytier-core.exe' })).catch(() => setRuntime(null)); }, []);
+  const refreshService = async () => {
+    try {
+      const next = await getServiceStatus();
+      setService(next);
+      if (next.running && next.healthy !== false) {
+        const states = await serviceRequest<ServiceInstanceState[]>('list_instances');
+        setInstances(xs => xs.map(i => {
+          const s = states.find(x => x.id === i.id);
+          return s ? { ...i, name: s.name || i.name, status: s.observed_state, autoStart: s.auto_start, desiredState: s.desired_state, lastError: s.last_error } : i;
+        }));
+      }
+    } catch (e) {
+      setService({ installed: false, running: false, message: String(e) });
+    }
+  };
+  useEffect(() => { void refreshService(); }, []);
 
   useEffect(() => { localStorage.setItem('easytier.peer-cols.v1', JSON.stringify(visibleCols)); }, [visibleCols]);
   useEffect(() => { localStorage.setItem('easytier.refresh.v1', JSON.stringify(refreshSecs)); }, [refreshSecs]);
@@ -202,6 +225,17 @@ export default function App() {
     }
     setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, status: running ? 'stopping' : 'starting' } : i)));
     try {
+      if (serviceMode) {
+        await serviceRequest('sync_instance', {
+          instance_id: current.id, name: current.name, config_toml: encodeTOML(current.config),
+          rpc_port: current.rpcPort, auto_start: current.autoStart ?? false,
+          desired_state: running ? 'stopped' : 'running',
+        });
+        await serviceRequest(running ? 'stop_instance' : 'start_instance', { instance_id: current.id });
+        await refreshService();
+        addLog(`[${current.name}] 服务已${running ? '停止' : '启动'}网络`);
+        return;
+      }
       if (running) {
         // Race the kill against a timeout: if the backend never resolves (or
         // the CLI bridge wedges), fail visibly instead of hanging in
@@ -321,9 +355,14 @@ export default function App() {
     const runningInstances = instances.filter(i => i.status === 'running').map(i => ({ id: i.id, config: encodeTOML(i.config), rpc_port: i.rpcPort }));
     setKernelUpdate({ phase: 'checking', downloaded_bytes: 0, total_bytes: null, percent: 0, message: '正在准备更新' });
     try {
-      await invoke<KernelUpdateInfo>('update_kernel', { proxy: kernelProxy, instances: runningInstances });
+      if (serviceMode) {
+        await serviceRequest('update_kernel', { proxy: kernelProxy });
+      } else {
+        await invoke<KernelUpdateInfo>('update_kernel', { proxy: kernelProxy, instances: runningInstances });
+      }
       setKernelInfo(await invoke<KernelUpdateInfo>('check_kernel_update', { proxy: kernelProxy }));
-      setInstances(xs => xs.map(i => runningInstances.some(r => r.id === i.id) ? { ...i, status: 'running' } : i));
+      if (serviceMode) await refreshService();
+      else setInstances(xs => xs.map(i => runningInstances.some(r => r.id === i.id) ? { ...i, status: 'running' } : i));
     } catch (e) {
       setKernelUpdate({ phase: 'failed', downloaded_bytes: 0, total_bytes: null, percent: 0, message: '内核更新失败', error: String(e) });
     }
@@ -363,6 +402,8 @@ export default function App() {
       </aside>
 
       <section className="content">
+        {!serviceMode && <div className="service-banner"><strong>兼容模式</strong><span>后台服务不可用，当前使用 GUI 直接管理内核；启停网络可能需要管理员权限。</span><button className="ghost" onClick={() => setTab('settings')}>查看服务设置</button></div>}
+        {serviceMode && <div className="service-banner service-online"><strong>服务模式</strong><span>EasyTier Service 正在管理网络实例。</span></div>}
         <header>
           <div>
             <p className="eyebrow">{navItems.find(([t]) => t === tab)?.[1]}</p>
@@ -568,6 +609,15 @@ export default function App() {
 
         {tab === 'settings' && (
           <>
+            <div className="card service-card">
+              <div className="card-title-row"><h3 className="card-title">后台服务</h3><span className={serviceMode ? 'service-state online' : 'service-state'}>{serviceMode ? '服务模式' : '兼容模式'}</span></div>
+              <p className="hint">{service?.message || (service?.installed ? (service?.running ? '服务正在运行。' : '服务已安装但尚未运行。') : '未检测到 EasyTierService。')}</p>
+              <div className="service-actions">
+                {!service?.installed && <button className="primary" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await serviceRequest('install_service'); await refreshService(); } catch (e) { alert(`安装服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>安装后台服务</button>}
+                {service?.installed && !service?.running && <button className="primary" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await serviceRequest('start_service'); await refreshService(); } catch (e) { alert(`启动服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>启动服务</button>}
+                {service?.installed && <button className="ghost" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await serviceRequest('repair_service'); await refreshService(); } catch (e) { alert(`修复服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>修复服务</button>}
+              </div>
+            </div>
             <div className="card">
               <h3 className="card-title">运行时</h3>
               <table className="kv-table">
@@ -610,6 +660,11 @@ export default function App() {
                         <input className="field-input narrow" type="number" value={i.rpcPort} min={1024} max={65535}
                           onChange={e => setInstances(xs => xs.map(x => (x.id === i.id ? { ...x, rpcPort: parseInt(e.target.value, 10) || x.rpcPort } : x)))} />
                         <span className="hint-inline">{i.status === 'running' ? '运行中' : '已停止'}</span>
+                        <button className={i.autoStart ? 'switch on' : 'switch'} role="switch" aria-checked={i.autoStart ?? false} title="开机自动启动" onClick={async () => {
+                          const next = !(i.autoStart ?? false);
+                          if (serviceMode) { try { await serviceRequest('set_auto_start', { instance_id: i.id, auto_start: next }); } catch (e) { alert(`更新自动启动失败：${String(e)}`); return; } }
+                          setInstances(xs => xs.map(x => x.id === i.id ? { ...x, autoStart: next } : x));
+                        }}><span className="knob" /></button><span className="hint-inline">自动启动</span>
                       </td>
                     </tr>
                   ))}

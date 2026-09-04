@@ -70,8 +70,15 @@ jobs:
           Copy-Item -Path ($core.DirectoryName + '/*') -Destination src-tauri/core-stage -Recurse -Force
           if (-not (Test-Path src-tauri/core-stage/easytier-cli.exe)) { throw 'easytier-cli.exe not found in downloaded archive' }
 
+      - name: Build service binary
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path src-tauri/Cargo.toml --bin easytier-service
+
       - name: Build Tauri app
-        run: npm exec tauri -- build --target ${{ matrix.target }} --config src-tauri/tauri.release.conf.json
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/service-stage | Out-Null
+          Copy-Item "src-tauri/target/${{ matrix.target }}/release/easytier-service.exe" "src-tauri/service-stage/easytier-service.exe" -Force
+          npm exec tauri -- build --target ${{ matrix.target }} --config src-tauri/tauri.release.conf.json
 
       - name: Assemble portable package
         shell: pwsh
@@ -80,7 +87,11 @@ jobs:
           $bundle = 'easytier-win-client_${{ matrix.arch }}_portable'
           New-Item -ItemType Directory -Force -Path "$bundle/core" | Out-Null
           Copy-Item "$release/easytier-win-client.exe" "$bundle/easytier-win-client.exe"
+          Copy-Item "src-tauri/target/${{ matrix.target }}/release/easytier-service.exe" "$bundle/easytier-service.exe"
           Copy-Item 'src-tauri/core-stage/*' "$bundle/core" -Recurse -Force
+          foreach ($required in @('easytier-core.exe','easytier-cli.exe','wintun.dll','WinDivert64.sys','Packet.dll')) {
+            if (-not (Test-Path "src-tauri/core-stage/$required")) { throw "Missing runtime file: $required" }
+          }
           Compress-Archive -Path "$bundle/*" -DestinationPath "$bundle.zip" -Force
 
       - name: Upload artifacts

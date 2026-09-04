@@ -7,6 +7,14 @@ edition = "2021"
 name = "easytier_win_client_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "easytier-win-client"
+path = "src/main.rs"
+
+[[bin]]
+name = "easytier-service"
+path = "src/service_main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -18,3 +26,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 wait-timeout = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 zip = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+named_pipe = "0.4"

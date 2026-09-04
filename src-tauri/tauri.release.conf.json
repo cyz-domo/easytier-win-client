@@ -4,7 +4,8 @@
     "active": true,
     "targets": ["nsis"],
     "resources": {
-      "core-stage/*": "core/"
+      "core-stage/*": "core/",
+      "service-stage/easytier-service.exe": "easytier-service.exe"
     }
   }
 }
