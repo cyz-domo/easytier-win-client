@@ -2,6 +2,7 @@
 name = "easytier-win-client"
 version = "0.1.0"
 edition = "2021"
+default-run = "easytier-win-client"
 
 [lib]
 name = "easytier_win_client_lib"
