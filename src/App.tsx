@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { defaultConfig, NetworkConfig, validateConfig } from './network-config';
+import { defaultConfig, listenersForInstance, NetworkConfig, validateConfig } from './network-config';
 import { decodeTOML, encodeTOML } from './toml-codec';
 import { ConfigEditor } from './ConfigEditor';
 import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, parseNodeJSON, parsePeerJSON, parseRouteJSON } from './status-data';
@@ -86,11 +86,23 @@ export default function App() {
   useEffect(() => { if (statusError) addLog(`状态查询失败：${statusError}`); }, [statusError]);
 
   const patchConfig = (patch: Partial<NetworkConfig>) =>
-    setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, config: { ...i.config, ...patch } } : i)));
+    setInstances(xs => xs.map(i => {
+      if (i.id !== current.id) return i;
+      const config = { ...i.config, ...patch };
+      // Keep the sidebar instance name in sync with the network name.
+      const name = patch.network_name !== undefined && patch.network_name.trim() ? patch.network_name : i.name;
+      return { ...i, name, config };
+    }));
 
   const addInstance = () => {
     const id = crypto.randomUUID();
-    setInstances(xs => [...xs, { id, name: '新网络', status: 'stopped', rpcPort: nextRpcPort(xs), config: defaultConfig() }]);
+    setInstances(xs => [...xs, {
+      id,
+      name: '新网络',
+      status: 'stopped',
+      rpcPort: nextRpcPort(xs),
+      config: { ...defaultConfig(), listener_urls: listenersForInstance(xs.length) },
+    }]);
     setActiveId(id);
     setTab('config');
   };
@@ -117,6 +129,11 @@ export default function App() {
         if (errors.length) throw new Error(errors[0].message);
         const toml = encodeTOML(current.config);
         await invoke('start_instance', { id: current.id, config: toml, rpcPortal: `127.0.0.1:${current.rpcPort}` });
+        // Give the core a moment, then check whether it exited instantly
+        // (port conflict / config error) so we fail instead of hanging.
+        await new Promise(r => setTimeout(r, 1200));
+        const s = await invoke<{ status: Status; error?: string }>('wait_for_exit', { id: current.id });
+        if (s.status === 'failed') throw new Error(s.error || 'core 进程启动失败');
         setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, status: 'running' } : i)));
         addLog(`[${current.name}] 网络已启动，RPC ${current.rpcPort}`);
       }
@@ -124,6 +141,8 @@ export default function App() {
       setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, status: 'failed' } : i)));
       addLog(`[${current.name}] 操作失败：${String(e)}`);
       alert(`网络操作失败：${String(e)}`);
+      // Refresh state so a self-exited core transitions out of "failed" cleanly.
+      invoke('get_instance_state', { id: current.id }).catch(() => undefined);
     }
   };
 

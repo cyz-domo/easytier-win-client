@@ -10,7 +10,7 @@ pub struct InstanceState { pub id: String, pub status: InstanceStatus, pub pid: 
 #[derive(Serialize)]
 pub struct RuntimeInfo { pub core_path: String, pub cli_path: String, pub version: String, pub available: bool }
 #[derive(Default)]
-pub struct RuntimeProcesses { children: HashMap<String, Child> }
+pub struct RuntimeProcesses { children: HashMap<String, Child>, last_error: HashMap<String, String> }
 
 fn runtime_dir(runtime_dir: Option<String>) -> PathBuf {
     if let Some(d) = runtime_dir { return PathBuf::from(d); }
@@ -29,7 +29,20 @@ fn paths(dir_override: Option<String>) -> (PathBuf, PathBuf) { let d = runtime_d
 #[tauri::command]
 fn detect_runtime(runtime_dir: Option<String>) -> RuntimeInfo { let (core, cli) = paths(runtime_dir); let version = Command::new(&core).arg("--version").output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_else(|| "unknown".into()).trim().to_string(); RuntimeInfo { core_path: core.display().to_string(), cli_path: cli.display().to_string(), version, available: core.exists() && cli.exists() } }
 #[tauri::command]
-fn get_instance_state(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> InstanceState { let running = state.lock().unwrap().children.contains_key(&id); InstanceState { id, status: if running { InstanceStatus::Running } else { InstanceStatus::Stopped }, pid: None, error: None } }
+fn get_instance_state(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> InstanceState {
+    let mut p = state.lock().unwrap();
+    let running = p.children.contains_key(&id);
+    if !running {
+        // Child exited on its own (e.g. port conflict): surface the failure.
+        if let Some(err) = p.last_error.remove(&id) {
+            return InstanceState { id, status: InstanceStatus::Failed, pid: None, error: Some(err) };
+        }
+        if let Some(mut child) = p.children.remove(&id) {
+            let _ = child.wait();
+        }
+    }
+    InstanceState { id, status: if running { InstanceStatus::Running } else { InstanceStatus::Stopped }, pid: None, error: None }
+}
 #[tauri::command]
 fn start_instance(id: String, config: String, rpc_portal: Option<String>, dir_override: Option<String>, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> Result<InstanceState, String> {
     let (core, _) = paths(dir_override);
@@ -47,7 +60,27 @@ fn start_instance(id: String, config: String, rpc_portal: Option<String>, dir_ov
     Ok(InstanceState { id, status: InstanceStatus::Running, pid: Some(pid), error: None })
 }
 #[tauri::command]
+fn wait_for_exit(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> Result<InstanceState, String> {
+    // Blocks until the child exits or a short grace period passes; used by the
+    // UI right after start to detect instant failures like port conflicts.
+    let mut p = state.lock().map_err(|_| "runtime state unavailable".to_string())?;
+    if let Some(child) = p.children.get_mut(&id) {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut child = p.children.remove(&id).unwrap();
+                let _ = child.wait();
+                let err = format!("core 进程启动后立即退出（exit code: {}）。常见原因：监听器端口被占用（多实例需使用不同 listener 端口）、配置校验失败或缺少管理员权限。", status.code().unwrap_or(-1));
+                p.last_error.insert(id.clone(), err.clone());
+                return Ok(InstanceState { id, status: InstanceStatus::Failed, pid: None, error: Some(err) });
+            }
+            Ok(None) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(InstanceState { id, status: InstanceStatus::Running, pid: None, error: None })
+}
+#[tauri::command]
 fn stop_instance(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> Result<InstanceState, String> { let mut p = state.lock().map_err(|_| "runtime state unavailable".to_string())?; if let Some(mut child) = p.children.remove(&id) { child.kill().map_err(|e| e.to_string())?; let _ = child.wait(); } Ok(InstanceState { id, status: InstanceStatus::Stopped, pid: None, error: None }) }
 #[tauri::command]
 fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<String, String> { let (_, cli) = paths(runtime_dir); let o = Command::new(cli).args(args).output().map_err(|e| e.to_string())?; if o.status.success() { String::from_utf8(o.stdout).map_err(|e| e.to_string()) } else { Err(String::from_utf8_lossy(&o.stderr).to_string()) } }
-pub fn run() { tauri::Builder::default().manage(Mutex::new(RuntimeProcesses::default())).invoke_handler(tauri::generate_handler![detect_runtime, get_instance_state, start_instance, stop_instance, run_cli]).run(tauri::generate_context!()).expect("error while running tauri application"); }
+pub fn run() { tauri::Builder::default().manage(Mutex::new(RuntimeProcesses::default())).invoke_handler(tauri::generate_handler![detect_runtime, get_instance_state, start_instance, wait_for_exit, stop_instance, run_cli]).run(tauri::generate_context!()).expect("error while running tauri application"); }

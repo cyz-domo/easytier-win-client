@@ -81,6 +81,19 @@ export const LISTENER_SUGGESTIONS = [
   'faketcp://0.0.0.0:11013',
 ];
 
+// Port-0 listeners let the OS assign free ports — used for the second and
+// later instances so multiple cores can run side by side (mirrors the macOS
+// app's ListenerURLDefaults.autoPortListeners).
+export const AUTO_PORT_LISTENERS = [
+  'tcp://0.0.0.0:0',
+  'udp://0.0.0.0:0',
+  'wg://0.0.0.0:0',
+];
+
+export function listenersForInstance(index: number): string[] {
+  return index === 0 ? ['tcp://0.0.0.0:11010', 'udp://0.0.0.0:11010', 'wg://0.0.0.0:11011'] : [...AUTO_PORT_LISTENERS];
+}
+
 export function defaultConfig(): NetworkConfig {
   return {
     instance_id: crypto.randomUUID(),
