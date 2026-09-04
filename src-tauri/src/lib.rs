@@ -31,7 +31,21 @@ fn detect_runtime(runtime_dir: Option<String>) -> RuntimeInfo { let (core, cli) 
 #[tauri::command]
 fn get_instance_state(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> InstanceState { let running = state.lock().unwrap().children.contains_key(&id); InstanceState { id, status: if running { InstanceStatus::Running } else { InstanceStatus::Stopped }, pid: None, error: None } }
 #[tauri::command]
-fn start_instance(id: String, config: String, runtime_dir: Option<String>, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> Result<InstanceState, String> { let (core, _) = paths(runtime_dir); if !core.exists() { return Err(format!("EasyTier core not found: {}", core.display())); } let config_path = std::env::temp_dir().join(format!("easytier-{}.toml", id)); fs::write(&config_path, config).map_err(|e| e.to_string())?; let mut p = state.lock().map_err(|_| "runtime state unavailable".to_string())?; if p.children.contains_key(&id) { return Ok(InstanceState { id, status: InstanceStatus::Running, pid: None, error: None }); } let child = Command::new(core).arg("--config-file").arg(&config_path).stdin(Stdio::null()).spawn().map_err(|e| e.to_string())?; let pid = child.id(); p.children.insert(id.clone(), child); Ok(InstanceState { id, status: InstanceStatus::Running, pid: Some(pid), error: None }) }
+fn start_instance(id: String, config: String, rpc_portal: Option<String>, dir_override: Option<String>, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> Result<InstanceState, String> {
+    let (core, _) = paths(dir_override);
+    if !core.exists() { return Err(format!("EasyTier core not found: {}", core.display())); }
+    let config_path = std::env::temp_dir().join(format!("easytier-{}.toml", id));
+    fs::write(&config_path, config).map_err(|e| e.to_string())?;
+    let mut p = state.lock().map_err(|_| "runtime state unavailable".to_string())?;
+    if p.children.contains_key(&id) { return Ok(InstanceState { id, status: InstanceStatus::Running, pid: None, error: None }); }
+    let mut cmd = Command::new(core);
+    cmd.arg("--config-file").arg(&config_path).stdin(Stdio::null());
+    if let Some(portal) = rpc_portal { cmd.arg("--rpc-portal").arg(portal); }
+    let child = cmd.spawn().map_err(|e| e.to_string())?;
+    let pid = child.id();
+    p.children.insert(id.clone(), child);
+    Ok(InstanceState { id, status: InstanceStatus::Running, pid: Some(pid), error: None })
+}
 #[tauri::command]
 fn stop_instance(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> Result<InstanceState, String> { let mut p = state.lock().map_err(|_| "runtime state unavailable".to_string())?; if let Some(mut child) = p.children.remove(&id) { child.kill().map_err(|e| e.to_string())?; let _ = child.wait(); } Ok(InstanceState { id, status: InstanceStatus::Stopped, pid: None, error: None }) }
 #[tauri::command]
