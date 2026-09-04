@@ -9,23 +9,16 @@
 ; from app settings without leaving a half-deleted install.
 
 !macro _EasyTierStopService
-  DetailPrint "Stopping EasyTier Service..."
+  DetailPrint "Stopping existing EasyTier Service..."
+  ; An upgrade must remove the old registration before create: sc.exe create
+  ; fails with ERROR_SERVICE_EXISTS and otherwise leaves the old binPath alive.
   nsExec::ExecToLog 'sc.exe stop EasyTierService'
-  ; Wait up to ~15s for the service (and the cores it owns) to exit so files
-  ; are not locked during uninstall.
-  StrCpy $0 0
-  wait_loop:
-    nsExec::ExecToLog 'sc.exe query EasyTierService /nopaging'
-    Pop $1
-    ${If} $1 != 0
-      Goto service_stopped
-    ${EndIf}
-    Sleep 1000
-    IntOp $0 $0 + 1
-    ${If} $0 < 15
-      Goto wait_loop
-    ${EndIf}
-  service_stopped:
+  Pop $0
+  Sleep 2000
+  nsExec::ExecToLog 'sc.exe delete EasyTierService'
+  Pop $0
+  ; Give SCM time to finish marking the old service for deletion.
+  Sleep 1000
 !macroend
 
 ; Resolve the original interactive user's SID via the explorer process owner.
@@ -84,24 +77,36 @@ Function trim_sid
 FunctionEnd
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; Remove a previous registration before creating the new path.
+  !insertmacro _EasyTierStopService
   !insertmacro _EasyTierResolveUserSid
   ${If} $R8 == ""
     DetailPrint "Warning: cannot resolve interactive user SID; skipping service auto-install. Use app settings to install it."
   ${Else}
-    DetailPrint "Installing EasyTier Service..."
-    nsExec::ExecToLog 'sc.exe create EasyTierService binPath= "\"$INSTDIR\resources\easytier-service.exe\" --interactive-user-sid=$R8" start= auto DisplayName= "EasyTier Service"'
-    Pop $0
-    ${If} $0 = 0
-      nsExec::ExecToLog 'sc.exe description EasyTierService "EasyTier background service"'
-      nsExec::ExecToLog 'sc.exe start EasyTierService'
+    ; Tauri resource layouts can place this file in either location depending
+    ; on bundle mode; register the path that actually exists.
+    StrCpy $R9 "$INSTDIR\easytier-service.exe"
+    ${IfNot} ${FileExists} "$R9"
+      StrCpy $R9 "$INSTDIR\resources\easytier-service.exe"
+    ${EndIf}
+    ${IfNot} ${FileExists} "$R9"
+      DetailPrint "Warning: easytier-service.exe is missing; service was not registered."
+    ${Else}
+      DetailPrint "Installing EasyTier Service..."
+      nsExec::ExecToLog 'sc.exe create EasyTierService binPath= "\"$R9\" --interactive-user-sid=$R8" start= auto DisplayName= "EasyTier Service"'
       Pop $0
       ${If} $0 = 0
-        DetailPrint "EasyTier Service started."
+        nsExec::ExecToLog 'sc.exe description EasyTierService "EasyTier background service"'
+        nsExec::ExecToLog 'sc.exe start EasyTierService'
+        Pop $0
+        ${If} $0 = 0
+          DetailPrint "EasyTier Service started."
+        ${Else}
+          DetailPrint "Warning: service registered but failed to start (error $0). It can be started from the app settings."
+        ${EndIf}
       ${Else}
-        DetailPrint "Warning: service registered but failed to start (error $0). It can be started from the app settings."
+        DetailPrint "Warning: service registration failed (error $0). You can install it later from app settings."
       ${EndIf}
-    ${Else}
-      DetailPrint "Warning: service registration failed (error $0). You can install it later from app settings."
     ${EndIf}
   ${EndIf}
 !macroend
