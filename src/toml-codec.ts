@@ -105,10 +105,10 @@ export function encodeTOML(c: NetworkConfig, exportSecrets = true): string {
   if (!c.dhcp && c.virtual_ipv4) d.ipv4 = `${c.virtual_ipv4}/${c.network_length}`;
   if (c.ipv6_public_addr_auto === true) d.ipv6_public_addr_auto = true;
   if (c.hostname) d.hostname = c.hostname;
-  if (c.listener_urls.length) d.listeners = c.listener_urls;
-  if (c.mapped_listeners.length) d.mapped_listeners = c.mapped_listeners;
-  if (c.enable_manual_routes && c.routes.length) d.routes = c.routes;
-  if (c.exit_nodes.length) d.exit_nodes = c.exit_nodes;
+  if (c.listener_urls?.length) d.listeners = c.listener_urls;
+  if (c.mapped_listeners?.length) d.mapped_listeners = c.mapped_listeners;
+  if (c.enable_manual_routes && c.routes?.length) d.routes = c.routes;
+  if (c.exit_nodes?.length) d.exit_nodes = c.exit_nodes;
   if (c.mtu != null) d.mtu = c.mtu;
   if (c.credential_file) d.credential_file = c.credential_file;
   if (c.enable_socks5 === true) d.socks5_proxy = `socks5://127.0.0.1:${c.socks5_port}`;
@@ -137,7 +137,7 @@ export function encodeTOML(c: NetworkConfig, exportSecrets = true): string {
   };
   emit('instance_name', d.instance_name ? T(d.instance_name) : null);
   emit('instance_id', d.instance_id ? T(d.instance_id) : null);
-  if (d.dhcp === false) emit('dhcp', 'false');
+  if (d.dhcp != null) emit('dhcp', String(d.dhcp));
   emit('ipv4', d.ipv4 ? T(d.ipv4) : null);
   if (d.ipv6_public_addr_auto) emit('ipv6_public_addr_auto', 'true');
   emit('hostname', d.hostname ? T(d.hostname) : null);
@@ -213,7 +213,7 @@ export function encodeTOML(c: NetworkConfig, exportSecrets = true): string {
 function parseSectionBlock(lines: string[], start: number): { body: string[]; end: number } {
   const body: string[] = [];
   let i = start + 1;
-  while (i < lines.length && !/^\s*\[/.test(lines[i])) {
+  while (i < lines.length && !/^\s*\[\[?[^[\]]+\]\]?\s*$/.test(lines[i])) {
     if (lines[i].trim()) body.push(lines[i].trim());
     i += 1;
   }
@@ -263,18 +263,17 @@ export function decodeTOML(text: string): NetworkConfig {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
+    const arraySection = line.match(/^\s*\[\[([^\]]+)\]\]\s*$/);
+    if (arraySection) {
+      const { body, end } = parseSectionBlock(lines, i);
+      (arraySections[arraySection[1].trim()] ||= []).push(body);
+      i = end + 1;
+      continue;
+    }
     const section = line.match(/^\s*\[([^\]]+)\]\s*$/);
     if (section) {
-      const name = section[1].trim();
-      if (name.startsWith('[')) {
-        const inner = name.replace(/^\[|\]$/g, '');
-        const { body, end } = parseSectionBlock(lines, i);
-        (arraySections[inner] ||= []).push(body);
-        i = end + 1;
-        continue;
-      }
       const { body, end } = parseSectionBlock(lines, i);
-      sections[name] = (sections[name] || []).concat(body);
+      sections[section[1].trim()] = (sections[section[1].trim()] || []).concat(body);
       i = end + 1;
       continue;
     }
@@ -288,8 +287,9 @@ export function decodeTOML(text: string): NetworkConfig {
 
   cfg.instance_id = str(find(root, 'instance_id') || '') || crypto.randomUUID();
   const dhcpRaw = bool(find(root, 'dhcp') || '');
-  if (dhcpRaw != null) cfg.dhcp = dhcpRaw;
-  const ipv4 = str(find(root, 'ipv4') || '');
+  cfg.dhcp = dhcpRaw ?? true;
+  const hasIpv4Key = root.some(l => /^ipv4(\s|=)/.test(l));
+  const ipv4 = hasIpv4Key ? (str(find(root, 'ipv4') || '') || '') : '';
   if (ipv4) {
     const parts = ipv4.split('/');
     cfg.virtual_ipv4 = parts[0];
@@ -299,6 +299,9 @@ export function decodeTOML(text: string): NetworkConfig {
       else cfg.network_length = len;
     }
     cfg.dhcp = false;
+  } else if (hasIpv4Key && !ipv4) {
+    // `ipv4 = ""` present but empty: fall back to DHCP like the macOS codec.
+    cfg.dhcp = true;
   }
   cfg.hostname = str(find(root, 'hostname') || '');
   const listeners = strArray(find(root, 'listeners') || '');
