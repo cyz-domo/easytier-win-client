@@ -33,11 +33,21 @@ interface runtimeInfo { available: boolean; version: string; core_path?: string 
 // leftover transitional or running marker is healed to 'stopped'.
 const healStatus = (s: Status): Status => (s === 'starting' || s === 'stopping' || s === 'running' ? 'stopped' : s);
 
+// Configs persisted by older builds may miss fields added later; merging each
+// saved config over the defaults keeps the editor from reading undefined.
+const loadInstances = (): Instance[] => {
+  const saved = load<Instance[]>('easytier.instances.v2', []).map(i => ({
+    ...i,
+    status: healStatus(i.status),
+    config: { ...defaultConfig(), ...i.config } as NetworkConfig,
+  }));
+  return saved.length
+    ? saved
+    : [{ id: crypto.randomUUID(), name: '我的网络', status: 'stopped', rpcPort: 15888, config: defaultConfig() }];
+};
+
 export default function App() {
-  const [instances, setInstances] = useState<Instance[]>(() =>
-    load<Instance[]>('easytier.instances.v2', []).map(i => ({ ...i, status: healStatus(i.status) })).length
-      ? load<Instance[]>('easytier.instances.v2', []).map(i => ({ ...i, status: healStatus(i.status) }))
-      : [{ id: crypto.randomUUID(), name: '我的网络', status: 'stopped', rpcPort: 15888, config: defaultConfig() }]);
+  const [instances, setInstances] = useState<Instance[]>(loadInstances);
   const [activeId, setActiveId] = useState<string>(() => load('easytier.active.v2', ''));
   const [tab, setTab] = useState<Tab>('status');
   const [showAdvanced, setShowAdvanced] = useState(false);

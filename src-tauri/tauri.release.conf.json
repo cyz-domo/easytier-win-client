@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [],
+    "resources": {
+      "core-stage/": "core/"
+    }
+  }
+}

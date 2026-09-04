@@ -3,7 +3,7 @@
 // network_identity, peer[], proxy_network[], vpn_portal_config, port_forward[],
 // flags) so configs are interchangeable between the two clients.
 
-import { NetworkConfig, PortForwardConfig } from './network-config';
+import { defaultConfig, NetworkConfig, PortForwardConfig } from './network-config';
 
 interface FlagsTOML {
   latency_first?: boolean;
@@ -424,9 +424,7 @@ export function decodeTOML(text: string): NetworkConfig {
   }
 
   if (errors.length) throw new Error(errors.join('；'));
-  // Sections absent from the document must still yield usable arrays —
-  // encodeTOML reads them unconditionally.
-  cfg.proxy_cidrs ||= [];
-  cfg.port_forwards ||= [];
-  return cfg as NetworkConfig;
+  // Merge over a full default config: fields absent from the TOML document
+  // must not be left undefined, or the advanced editor crashes on them.
+  return { ...defaultConfig(), ...cfg } as NetworkConfig;
 }

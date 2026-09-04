@@ -1,0 +1,82 @@
+name: Build Windows Release
+
+# ① 触发方式
+on:
+  # 这里监听任何分支的 push（* 代表 all branches）
+  push:
+    branches:
+      - '*'
+  
+  # 手动触发，可在输入框里填写要构建的分支（默认 main）
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build'
+        default: main
+        required: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: amd64
+            triple: x86_64-pc-windows-msvc
+          - target: arm64
+            triple: aarch64-pc-windows-msvc
+
+    env:
+      # 根据触发方式决定 checkout 的分支：
+      # ① 手动触发时使用输入的 branch；
+      # ② push 触发时使用被 push 的分支名
+      BUILD_BRANCH: |
+        ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BUILD_BRANCH }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.triple }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install NPM dependencies
+        run: npm install
+
+      - name: Build Tauri
+        run: npx tauri build --target ${{ matrix.triple }}
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          # 路径可按项目实际情况调整
+          path: src-tauri/target/**/release/*.exe
+
+  # -------------------------------------------------
+  # Release 仅在 main 推送或手动触发时进行
+  # -------------------------------------------------
+  deploy:
+    needs: build
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: dist/**/*.exe
