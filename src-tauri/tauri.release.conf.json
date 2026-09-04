@@ -6,6 +6,12 @@
     "resources": {
       "core-stage/*": "core/",
       "service-stage/easytier-service.exe": "easytier-service.exe"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "./windows/installer-hooks.nsh"
+      }
     }
   }
 }
