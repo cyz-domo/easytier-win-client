@@ -82,5 +82,7 @@ fn wait_for_exit(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -
 #[tauri::command]
 fn stop_instance(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> Result<InstanceState, String> { let mut p = state.lock().map_err(|_| "runtime state unavailable".to_string())?; if let Some(mut child) = p.children.remove(&id) { child.kill().map_err(|e| e.to_string())?; let _ = child.wait(); } Ok(InstanceState { id, status: InstanceStatus::Stopped, pid: None, error: None }) }
 #[tauri::command]
+fn is_port_in_use(port: u16) -> bool { std::net::TcpListener::bind(("0.0.0.0", port)).is_err() }
+#[tauri::command]
 fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<String, String> { let (_, cli) = paths(runtime_dir); let o = Command::new(cli).args(args).output().map_err(|e| e.to_string())?; if o.status.success() { String::from_utf8(o.stdout).map_err(|e| e.to_string()) } else { Err(String::from_utf8_lossy(&o.stderr).to_string()) } }
-pub fn run() { tauri::Builder::default().manage(Mutex::new(RuntimeProcesses::default())).invoke_handler(tauri::generate_handler![detect_runtime, get_instance_state, start_instance, wait_for_exit, stop_instance, run_cli]).run(tauri::generate_context!()).expect("error while running tauri application"); }
+pub fn run() { tauri::Builder::default().manage(Mutex::new(RuntimeProcesses::default())).invoke_handler(tauri::generate_handler![detect_runtime, get_instance_state, start_instance, wait_for_exit, stop_instance, run_cli, is_port_in_use]).run(tauri::generate_context!()).expect("error while running tauri application"); }

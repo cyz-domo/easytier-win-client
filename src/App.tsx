@@ -118,6 +118,34 @@ export default function App() {
 
   const toggle = async () => {
     const running = current.status === 'running';
+    if (!running) {
+      // Pre-flight: detect listener port conflicts between instances so the
+      // user can change the port instead of hitting an opaque core failure.
+      const portOf = (url: string): number | null => {
+        const m = url.match(/:(\d+)(?:\/.*)?$/);
+        return m ? parseInt(m[1], 10) : null;
+      };
+      const myPorts = current.config.listener_urls.map(portOf).filter((p): p is number => p != null && p !== 0);
+      const conflicts: string[] = [];
+      for (const other of instances) {
+        if (other.id === current.id || other.status !== 'running') continue;
+        const otherPorts = new Set(other.config.listener_urls.map(portOf).filter((p): p is number => p != null));
+        for (const p of myPorts) {
+          if (otherPorts.has(p)) conflicts.push(`端口 ${p} 已被实例「${other.name}」占用`);
+        }
+      }
+      const systemConflicts: string[] = [];
+      for (const p of myPorts) {
+        try {
+          const busy = await invoke<boolean>('is_port_in_use', { port: p });
+          if (busy) systemConflicts.push(`端口 ${p} 已被系统其它程序占用`);
+        } catch { /* check unavailable — skip */ }
+      }
+      const all = [...new Set([...conflicts, ...systemConflicts])];
+      if (all.length) {
+        if (!confirm(`监听器端口冲突：\n\n${all.join('\n')}\n\n建议修改本实例监听器端口（或改用端口 0 自动分配）后再启动。仍要继续吗？`)) return;
+      }
+    }
     setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, status: running ? 'stopping' : 'starting' } : i)));
     try {
       if (running) {
@@ -149,9 +177,16 @@ export default function App() {
   const importToml = async (text: string) => {
     try {
       const config = decodeTOML(text);
+      // A different network must not reuse the current listener ports or the
+      // core will fail with a port conflict; keep the imported listeners only
+      // when they differ from the current ones.
+      const sameListeners =
+        config.listener_urls.length === current.config.listener_urls.length &&
+        config.listener_urls.every((u, i) => u === current.config.listener_urls[i]);
+      if (sameListeners) config.listener_urls = listenersForInstance(instances.indexOf(current) === 0 ? 0 : instances.indexOf(current));
       patchConfig(config);
-      addLog('TOML 配置导入成功');
-      alert('配置导入成功');
+      addLog(`TOML 配置导入成功（监听器 ${config.listener_urls.join(', ')}）`);
+      alert(`配置导入成功\n\n监听器：${config.listener_urls.join('\n')}\n\n若与其它实例端口冲突，请在监听器列表中修改端口后重新启动网络。`);
     } catch (e) {
       addLog(`TOML 导入失败：${String(e)}`);
       alert(`导入失败：${String(e)}`);
