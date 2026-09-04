@@ -1,6 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod kernel_updater;
+use kernel_updater::KernelUpdateInfo;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf, process::{Child, Command, Stdio}, sync::Mutex};
+use tauri::{Manager, WindowEvent};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use wait_timeout::ChildExt;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -11,7 +16,13 @@ pub struct InstanceState { pub id: String, pub status: InstanceStatus, pub pid: 
 #[derive(Serialize)]
 pub struct RuntimeInfo { pub core_path: String, pub cli_path: String, pub version: String, pub available: bool }
 #[derive(Default)]
-pub struct RuntimeProcesses { children: HashMap<String, Child>, last_error: HashMap<String, String> }
+pub struct RuntimeProcesses { pub children: HashMap<String, Child>, pub last_error: HashMap<String, String> }
+
+#[derive(Clone, Deserialize)]
+struct RestartInstance { id: String, config: String, rpc_port: u16 }
+
+#[derive(Default)]
+struct KernelUpdateLock(Mutex<()>);
 
 fn runtime_dir(runtime_dir: Option<String>) -> PathBuf {
     if let Some(d) = runtime_dir { return PathBuf::from(d); }
@@ -21,6 +32,8 @@ fn runtime_dir(runtime_dir: Option<String>) -> PathBuf {
             candidates.push(dir.join("core"));
             candidates.push(dir.join("../core"));
             candidates.push(dir.join("../../../core"));
+            candidates.push(dir.join("resources/core"));
+            candidates.push(dir.join("../resources/core"));
         }
     }
     for c in candidates { if c.join("easytier-core.exe").exists() { return c; } }
@@ -53,7 +66,9 @@ fn start_instance(id: String, config: String, rpc_portal: Option<String>, dir_ov
     let mut p = state.lock().map_err(|_| "runtime state unavailable".to_string())?;
     if p.children.contains_key(&id) { return Ok(InstanceState { id, status: InstanceStatus::Running, pid: None, error: None }); }
     let mut cmd = Command::new(core);
-    cmd.arg("--config-file").arg(&config_path).stdin(Stdio::null());
+    cmd.arg("--config-file").arg(&config_path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
     if let Some(portal) = rpc_portal { cmd.arg("--rpc-portal").arg(portal); }
     let child = cmd.spawn().map_err(|e| e.to_string())?;
     let pid = child.id();
@@ -83,7 +98,53 @@ fn wait_for_exit(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -
 #[tauri::command]
 fn stop_instance(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> Result<InstanceState, String> { let mut p = state.lock().map_err(|_| "runtime state unavailable".to_string())?; if let Some(mut child) = p.children.remove(&id) { child.kill().map_err(|e| e.to_string())?; let _ = child.wait(); } Ok(InstanceState { id, status: InstanceStatus::Stopped, pid: None, error: None }) }
 #[tauri::command]
+fn check_kernel_update(proxy: Option<String>) -> Result<KernelUpdateInfo, String> {
+    kernel_updater::check(proxy.as_deref().unwrap_or("direct"))
+}
+
+#[tauri::command]
+fn update_kernel(app: tauri::AppHandle, proxy: String, instances: Vec<RestartInstance>, state: tauri::State<'_, Mutex<RuntimeProcesses>>, update_lock: tauri::State<'_, KernelUpdateLock>) -> Result<KernelUpdateInfo, String> {
+    let _guard = update_lock.0.lock().map_err(|_| "内核更新锁不可用".to_string())?;
+    let runtime = runtime_dir(None);
+    let parent = runtime.parent().ok_or("无法确定 core 目录")?.to_path_buf();
+    kernel_updater::emit_progress(&app, "checking", "正在准备内核更新", 0, None, None, None);
+    let staged = match kernel_updater::download_and_stage(&app, proxy.as_str(), &runtime) {
+        Ok(path) => path,
+        Err(error) => { kernel_updater::emit_progress(&app, "failed", "内核下载或校验失败", 0, None, None, Some(error.clone())); return Err(error); }
+    };
+    kernel_updater::emit_progress(&app, "stopping", "正在停止运行中的网络", 0, None, None, None);
+    {
+        let mut processes = state.lock().map_err(|_| "runtime state unavailable".to_string())?;
+        for instance in &instances {
+            if let Some(mut child) = processes.children.remove(&instance.id) { child.kill().map_err(|e| e.to_string())?; let _ = child.wait(); }
+        }
+    }
+    kernel_updater::emit_progress(&app, "installing", "正在替换 EasyTier 内核", 0, None, None, None);
+    let backup = match kernel_updater::install(&runtime, &staged) {
+        Ok(path) => path,
+        Err(error) => { let _ = std::fs::remove_dir_all(&parent.join(staged.file_name().unwrap_or_default())); kernel_updater::emit_progress(&app, "failed", "内核替换失败", 0, None, None, Some(error.clone())); return Err(error); }
+    };
+    kernel_updater::emit_progress(&app, "restarting", "正在恢复原有网络", 0, None, None, None);
+    for instance in instances {
+        let config_path = std::env::temp_dir().join(format!("easytier-{}.toml", instance.id));
+        if let Err(error) = std::fs::write(&config_path, &instance.config).and_then(|_| {
+            let core = runtime.join("easytier-core.exe");
+            let mut cmd = Command::new(core);
+            cmd.arg("--config-file").arg(config_path).arg("--rpc-portal").arg(format!("127.0.0.1:{}", instance.rpc_port)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            #[cfg(windows)] cmd.creation_flags(0x08000000);
+            let child = cmd.spawn().map_err(std::io::Error::other)?;
+            state.lock().map_err(|_| std::io::Error::other("runtime state unavailable"))?.children.insert(instance.id.clone(), child);
+            Ok(())
+        }) { kernel_updater::emit_progress(&app, "failed", "部分网络恢复失败", 0, None, None, Some(error.to_string())); }
+    }
+    let _ = backup;
+    kernel_updater::emit_progress(&app, "completed", "EasyTier 内核更新完成", 1, Some(1), None, None);
+    Ok(KernelUpdateInfo { current_version: kernel_updater::CURRENT_VERSION.to_string(), latest_version: None, asset_name: None, update_available: false, error: None })
+}
+
+#[tauri::command]
 fn is_port_in_use(port: u16) -> bool { std::net::TcpListener::bind(("0.0.0.0", port)).is_err() }
+
 #[tauri::command]
 fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<String, String> {
     let (_, cli) = paths(runtime_dir);
@@ -100,4 +161,37 @@ fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<String, Str
         Err(e) => Err(e.to_string()),
     }
 }
-pub fn run() { tauri::Builder::default().manage(Mutex::new(RuntimeProcesses::default())).invoke_handler(tauri::generate_handler![detect_runtime, get_instance_state, start_instance, wait_for_exit, stop_instance, run_cli, is_port_in_use]).run(tauri::generate_context!()).expect("error while running tauri application"); }
+pub fn run() {
+    tauri::Builder::default()
+        .manage(Mutex::new(RuntimeProcesses::default()))
+        .manage(KernelUpdateLock::default())
+        .setup(|app| {
+            let show = tauri::menu::MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?;
+            let quit = tauri::menu::MenuItem::with_id(app, "quit", "退出 EasyTier", true, None::<&str>)?;
+            let menu = tauri::menu::Menu::with_items(app, &[&show, &quit])?;
+            tauri::tray::TrayIconBuilder::new()
+                .menu(&menu)
+                .tooltip("EasyTier")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .invoke_handler(tauri::generate_handler![detect_runtime, get_instance_state, start_instance, wait_for_exit, check_kernel_update, update_kernel, stop_instance, is_port_in_use, run_cli])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

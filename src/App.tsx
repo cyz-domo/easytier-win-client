@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { defaultConfig, listenersForInstance, NetworkConfig, validateConfig } from './network-config';
 import { decodeTOML, encodeTOML } from './toml-codec';
 import { ConfigEditor } from './ConfigEditor';
@@ -27,6 +28,21 @@ function nextRpcPort(instances: Instance[]): number {
 }
 
 interface runtimeInfo { available: boolean; version: string; core_path?: string }
+
+interface KernelUpdateInfo { current_version: string; latest_version?: string | null; asset_name?: string | null; update_available: boolean; error?: string | null }
+interface KernelUpdateProgress { phase: string; downloaded_bytes: number; total_bytes?: number | null; percent?: number | null; current_file?: string | null; message: string; error?: string | null }
+const KERNEL_PROXIES = [
+  { value: 'direct', label: '直连' },
+  { value: 'https://ghfast.top', label: 'https://ghfast.top/' },
+  { value: 'https://v6.gh-proxy.org', label: 'https://v6.gh-proxy.org/' },
+  { value: 'https://hk.gh-proxy.org', label: 'https://hk.gh-proxy.org/' },
+  { value: 'https://cdn.gh-proxy.org', label: 'https://cdn.gh-proxy.org/' },
+  { value: 'https://edgeone.gh-proxy.org', label: 'https://edgeone.gh-proxy.org/' },
+];
+
+const KERNEL_PHASE_TEXT: Record<string, string> = {
+  checking: '检查版本', downloading: '下载内核', extracting: '校验并解压', stopping: '停止网络', installing: '替换内核', restarting: '恢复网络', completed: '更新完成', failed: '更新失败',
+};
 
 // Status persisted in localStorage may be stale after an abnormal exit (the
 // backend child-process table is always empty on a fresh launch), so any
@@ -64,6 +80,9 @@ export default function App() {
   const [showDisplaySettings, setShowDisplaySettings] = useState(false);
   const [tomlDraft, setTomlDraft] = useState<string | null>(null);
   const [tomlError, setTomlError] = useState<string | null>(null);
+  const [kernelUpdate, setKernelUpdate] = useState<KernelUpdateProgress | null>(null);
+  const [kernelInfo, setKernelInfo] = useState<KernelUpdateInfo | null>(null);
+  const [kernelProxy, setKernelProxy] = useState<string>(() => load('easytier.kernel-update-proxy.v1', 'direct'));
   const logTimer = useRef<number | null>(null);
 
   const current = useMemo(() => instances.find(i => i.id === activeId) ?? instances[0], [instances, activeId]);
@@ -74,6 +93,17 @@ export default function App() {
 
   useEffect(() => { localStorage.setItem('easytier.peer-cols.v1', JSON.stringify(visibleCols)); }, [visibleCols]);
   useEffect(() => { localStorage.setItem('easytier.refresh.v1', JSON.stringify(refreshSecs)); }, [refreshSecs]);
+  useEffect(() => { localStorage.setItem('easytier.kernel-update-proxy.v1', JSON.stringify(kernelProxy)); }, [kernelProxy]);
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    void listen<KernelUpdateProgress>('kernel-update-progress', event => setKernelUpdate(event.payload)).then(fn => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
+  useEffect(() => {
+    void invoke<KernelUpdateInfo>('check_kernel_update', { proxy: kernelProxy }).then(setKernelInfo).catch(e => setKernelInfo({ current_version: runtime?.version ?? 'unknown', update_available: false, error: String(e) }));
+  // Runtime detection and the initial update check intentionally run once per app launch.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Poll peer/route status while an instance is running. Self-scheduling
   // timeout: the next round starts only after the previous one settles, so a
@@ -140,6 +170,7 @@ export default function App() {
     setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, name } : i)));
 
   const toggle = async () => {
+    if (kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)) return;
     const running = current.status === 'running';
     if (!running) {
       // Pre-flight: detect listener port conflicts between instances so the
@@ -277,6 +308,27 @@ export default function App() {
     setTomlError(null);
   };
 
+  const checkKernelUpdate = async () => {
+    setKernelInfo(null);
+    try { setKernelInfo(await invoke<KernelUpdateInfo>('check_kernel_update', { proxy: kernelProxy })); }
+    catch (e) { setKernelInfo({ current_version: runtime?.version ?? 'unknown', update_available: false, error: String(e) }); }
+  };
+
+  const updateKernel = async () => {
+    if (kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)) return;
+    if (!kernelInfo?.update_available) return;
+    if (!confirm(`将更新 EasyTier 内核至 v${kernelInfo.latest_version}，更新期间会停止并自动重启当前运行中的网络。继续吗？`)) return;
+    const runningInstances = instances.filter(i => i.status === 'running').map(i => ({ id: i.id, config: encodeTOML(i.config), rpc_port: i.rpcPort }));
+    setKernelUpdate({ phase: 'checking', downloaded_bytes: 0, total_bytes: null, percent: 0, message: '正在准备更新' });
+    try {
+      await invoke<KernelUpdateInfo>('update_kernel', { proxy: kernelProxy, instances: runningInstances });
+      setKernelInfo(await invoke<KernelUpdateInfo>('check_kernel_update', { proxy: kernelProxy }));
+      setInstances(xs => xs.map(i => runningInstances.some(r => r.id === i.id) ? { ...i, status: 'running' } : i));
+    } catch (e) {
+      setKernelUpdate({ phase: 'failed', downloaded_bytes: 0, total_bytes: null, percent: 0, message: '内核更新失败', error: String(e) });
+    }
+  };
+
   if (!current) return null;
   const running = current.status === 'running';
   const statusText = { running: '网络运行中', stopped: '网络已停止', starting: '正在启动…', stopping: '正在停止…', failed: '启动失败' }[current.status];
@@ -285,6 +337,13 @@ export default function App() {
 
   return (
     <main className="app-shell">
+      {kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase) && (
+        <div className="kernel-progress-global">
+          <div className="kernel-progress-head"><strong>EasyTier 内核更新</strong><span>{KERNEL_PHASE_TEXT[kernelUpdate.phase] || kernelUpdate.phase}</span></div>
+          <div className="kernel-progress-track"><div className="kernel-progress-bar" style={{ width: `${kernelUpdate.percent ?? 0}%` }} /></div>
+          <small>{kernelUpdate.message}{kernelUpdate.percent != null ? ` · ${kernelUpdate.percent}%` : ''}</small>
+        </div>
+      )}
       <aside>
         <div className="brand"><span className="brand-mark">E</span><div><strong>EasyTier</strong><small>Windows Client</small></div></div>
         <div className="section-label">网络实例</div>
@@ -311,7 +370,7 @@ export default function App() {
           </div>
           <div className="header-actions">
             {running && <span className="rpc-badge">RPC :{current.rpcPort}</span>}
-            <button className={running ? 'stop' : 'primary'} onClick={() => void toggle()} disabled={current.status === 'starting' || current.status === 'stopping'}>
+              <button className={running ? 'stop' : 'primary'} onClick={() => void toggle()} disabled={current.status === 'starting' || current.status === 'stopping' || (!!kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase))}>
               {running ? '停止网络' : '启动网络'}
             </button>
           </div>
@@ -520,7 +579,27 @@ export default function App() {
               </table>
             </div>
             <div className="card">
-              <h3 className="card-title">RPC 管理</h3>
+              <div className="card-title-row">
+                <h3 className="card-title">EasyTier 内核更新</h3>
+                <span className="hint-inline">当前 v{kernelInfo?.current_version || runtime?.version || '未检测'}</span>
+              </div>
+              <div className="kernel-update-controls">
+                <label className="field"><span className="field-label">GitHub 下载线路</span>
+                  <select className="field-input" value={kernelProxy} onChange={e => setKernelProxy(e.target.value)} disabled={!!kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)}>
+                    {KERNEL_PROXIES.map(p => <option value={p.value} key={p.value}>{p.label}</option>)}
+                  </select>
+                </label>
+                <div className="kernel-update-actions">
+                  <button className="ghost" onClick={() => void checkKernelUpdate()} disabled={!!kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)}>检查更新</button>
+                  {kernelInfo?.update_available && <button className="primary" onClick={() => void updateKernel()} disabled={!!kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)}>更新到 v{kernelInfo.latest_version}</button>}
+                </div>
+              </div>
+              {kernelInfo?.error && <p className="list-empty err">检查失败：{kernelInfo.error}</p>}
+              {kernelInfo && !kernelInfo.error && !kernelInfo.update_available && <p className="hint">当前已是最新正式版本。</p>}
+              {kernelUpdate?.phase === 'failed' && <p className="list-empty err">更新失败：{kernelUpdate.error || kernelUpdate.message}</p>}
+              {kernelUpdate?.phase === 'completed' && <p className="hint">内核更新完成，原来运行中的网络已尝试自动恢复。</p>}
+            </div>
+            <div className="card">
               <p className="hint">每个实例使用独立 RPC 端口，避免多实例冲突。启动网络后可通过 easytier-cli 连接该端口查询状态。</p>
               <table className="kv-table">
                 <tbody>
