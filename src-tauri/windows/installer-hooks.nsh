@@ -89,7 +89,7 @@ FunctionEnd
     DetailPrint "Warning: cannot resolve interactive user SID; skipping service auto-install. Use app settings to install it."
   ${Else}
     DetailPrint "Installing EasyTier Service..."
-    nsExec::ExecToLog 'sc.exe create EasyTierService binPath= "\"$INSTDIR\easytier-service.exe\" --interactive-user-sid=$R8" start= auto DisplayName= "EasyTier Service"'
+    nsExec::ExecToLog 'sc.exe create EasyTierService binPath= "\"$INSTDIR\resources\easytier-service.exe\" --interactive-user-sid=$R8" start= auto DisplayName= "EasyTier Service"'
     Pop $0
     ${If} $0 = 0
       nsExec::ExecToLog 'sc.exe description EasyTierService "EasyTier background service"'

@@ -101,6 +101,7 @@ export default function App() {
   const [service, setService] = useState<ServiceStatus | null>(null);
   const [serviceBusy, setServiceBusy] = useState(false);
   const serviceMode = service?.running === true && service?.healthy !== false;
+  const serviceInstalled = service?.installed === true;
   const logTimer = useRef<number | null>(null);
   const kernelTaskId = kernelUpdate?.task_id ?? null;
 
@@ -111,8 +112,17 @@ export default function App() {
   useEffect(() => { invoke<runtimeInfo>('detect_runtime', {}).then(v => setRuntime({ ...v, core_path: v.core_path ?? 'core/easytier-core.exe' })).catch(() => setRuntime(null)); }, []);
   const refreshService = async () => {
     try {
+      const installed = await invoke<{ installed: boolean; running: boolean; message?: string }>('query_service_installation');
+      if (!installed.installed) {
+        setService({ installed: false, running: false, message: installed.message });
+        return;
+      }
+      if (!installed.running) {
+        setService({ installed: true, running: false, message: '服务已安装但尚未运行。' });
+        return;
+      }
       const next = await getServiceStatus();
-      setService(next);
+      setService({ ...next, installed: true, running: true });
       if (next.running && next.healthy !== false) {
         const states = await serviceRequest<ServiceInstanceState[]>('list_instances');
         setInstances(xs => xs.map(i => {

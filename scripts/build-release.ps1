@@ -70,6 +70,23 @@ function Add-Pass([string]$message, [string]$detail = '') {
   Write-Host "  [OK] $message$suffix" -ForegroundColor Green
 }
 
+function Get-PeMachine([string]$Path) {
+  $bytes = [System.IO.File]::ReadAllBytes($Path)
+  if ($bytes.Length -lt 64) { return $null }
+  $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+  if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length -or $bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45) { return $null }
+  return [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+}
+
+function Assert-PeArchitecture([string]$Path, [int]$ExpectedMachine) {
+  $machine = Get-PeMachine $Path
+  if ($null -eq $machine -or $machine -ne $ExpectedMachine) {
+    $actual = if ($null -eq $machine) { 'unknown' } else { '0x{0:X4}' -f $machine }
+    throw "Architecture mismatch for $(Split-Path -Leaf $Path): machine $actual, expected 0x$('{0:X4}' -f $ExpectedMachine)"
+  }
+  Add-Pass "PE architecture $(Split-Path -Leaf $Path)" ("0x$('{0:X4}' -f $machine)")
+}
+
 Write-Host "== EasyTier Win Client local release build ==" -ForegroundColor Cyan
 Write-Host "Target triple: $(if ($Target -eq 'aarch64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' })"
 Write-Host ""
@@ -164,6 +181,8 @@ if ($SkipCoreDownload) {
   }
 } else {
   Write-Host '[4/5] Downloading EasyTier core runtime...' -ForegroundColor Cyan
+  if (Test-Path $coreStage) { Remove-Item $coreStage -Recurse -Force }
+  New-Item -ItemType Directory -Force -Path $coreStage | Out-Null
   $asset = if ($Target -eq 'aarch64') { "easytier-windows-arm64-v$CoreVersion.zip" } else { "easytier-windows-x86_64-v$CoreVersion.zip" }
   $url = "https://github.com/EasyTier/EasyTier/releases/download/v$CoreVersion/$asset"
   Write-Host "  $url"
@@ -174,7 +193,7 @@ if ($SkipCoreDownload) {
   New-Item -ItemType Directory -Force -Path $coreStage | Out-Null
   Copy-Item -Path ($core.DirectoryName + '/*') -Destination $coreStage -Recurse -Force
   Remove-Item -Recurse -Force core-expanded, easytier-core.zip
-  foreach ($required in @('easytier-core.exe', 'easytier-cli.exe')) {
+  foreach ($required in @('easytier-core.exe', 'easytier-cli.exe', 'wintun.dll', 'WinDivert64.sys', 'Packet.dll')) {
     if (-not (Test-Path "$coreStage/$required")) { Write-Host "Missing runtime file: $required" -ForegroundColor Red; exit 1 }
   }
 }
@@ -199,6 +218,11 @@ if ($LASTEXITCODE -ne 0) {
 # --- Assemble ----------------------------------------------------------------
 $releaseDir = "src-tauri/target/$targetTriple/release"
 $arch = if ($Target -eq 'aarch64') { 'arm64' } else { 'x64' }
+$expectedMachine = if ($Target -eq 'aarch64') { 0xAA64 } else { 0x8664 }
+Assert-PeArchitecture "$releaseDir/easytier-win-client.exe" $expectedMachine
+Assert-PeArchitecture "$releaseDir/easytier-service.exe" $expectedMachine
+Assert-PeArchitecture "$coreStage/easytier-core.exe" $expectedMachine
+Assert-PeArchitecture "$coreStage/easytier-cli.exe" $expectedMachine
 $portable = "easytier-win-client_${arch}_portable"
 
 New-Item -ItemType Directory -Force -Path "$portable/core" | Out-Null

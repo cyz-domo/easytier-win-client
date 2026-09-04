@@ -46,6 +46,28 @@ fn runtime_dir(runtime_dir: Option<String>) -> PathBuf {
     PathBuf::from("core")
 }
 fn paths(dir_override: Option<String>) -> (PathBuf, PathBuf) { let d = runtime_dir(dir_override); (d.join("easytier-core.exe"), d.join("easytier-cli.exe")) }
+#[derive(Serialize)]
+struct ServiceInstallation { installed: bool, running: bool, message: Option<String> }
+
+fn service_query() -> ServiceInstallation {
+    #[cfg(windows)] {
+        let output = Command::new("sc.exe").args(["query", "EasyTierService"]).output();
+        match output {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let running = text.contains("RUNNING") || text.contains("START_PENDING");
+                ServiceInstallation { installed: true, running, message: None }
+            }
+            Ok(_) => ServiceInstallation { installed: false, running: false, message: None },
+            Err(error) => ServiceInstallation { installed: false, running: false, message: Some(format!("无法查询服务：{error}")) },
+        }
+    }
+    #[cfg(not(windows))] { ServiceInstallation { installed: false, running: false, message: Some("Windows 服务不可用".into()) } }
+}
+
+#[tauri::command]
+fn query_service_installation() -> ServiceInstallation { service_query() }
+
 #[tauri::command]
 fn detect_runtime(runtime_dir: Option<String>) -> RuntimeInfo { let (core, cli) = paths(runtime_dir); let version = Command::new(&core).arg("--version").output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_else(|| "unknown".into()).trim().to_string(); RuntimeInfo { core_path: core.display().to_string(), cli_path: cli.display().to_string(), version, available: core.exists() && cli.exists() } }
 #[tauri::command]
@@ -213,7 +235,11 @@ fn install_service() -> Result<String, String> {
 
 #[tauri::command]
 fn start_service() -> Result<String, String> {
-    #[cfg(windows)] { scm_command(&["start", "EasyTierService"], "service_start_failed") }
+    #[cfg(windows)] {
+        let command = "Start-Service -Name EasyTierService";
+        let status = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &format!("Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile','-NonInteractive','-Command','{}'", command)]).status().map_err(|e| format!("service_start_failed: {e}"))?;
+        if status.success() { Ok("后台服务已启动".into()) } else { Err("service_start_failed: UAC 被拒绝或服务启动失败".into()) }
+    }
     #[cfg(not(windows))] { Err("service_unavailable: Windows SCM is unavailable on this platform".into()) }
 }
 
@@ -250,7 +276,7 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![detect_runtime, get_instance_state, start_instance, wait_for_exit, check_kernel_update, update_kernel, stop_instance, is_port_in_use, run_cli, service_request, install_service, start_service, repair_service])
+        .invoke_handler(tauri::generate_handler![query_service_installation, detect_runtime, get_instance_state, start_instance, wait_for_exit, check_kernel_update, update_kernel, stop_instance, is_port_in_use, run_cli, service_request, install_service, start_service, repair_service])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

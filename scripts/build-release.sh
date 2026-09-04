@@ -23,6 +23,21 @@ FIX=0
 SKIP_DEPS=0
 FAILURES=()
 
+for arg in "$@"; do
+  case "$arg" in
+    --fix) FIX=1 ;;
+    --skip-deps) SKIP_DEPS=1 ;;
+    -h|--help)
+      sed -n '1,18p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      exit 2
+      ;;
+  esac
+done
+
 log()   { printf '\033[36m== %s ==\033[0m\n' "$*"; }
 pass()  { printf '  \033[32m[OK]\033[0m %s\n' "$*"; }
 fail()  { printf '  \033[31m[X]\033[0m %s\n' "$*"; FAILURES+=("$1"); }
@@ -105,7 +120,16 @@ log "Running codec tests"
 npm run test:codec
 
 log "Building (release; several minutes)"
-cargo build --release --manifest-path src-tauri/Cargo.toml --bin easytier-service || true  # service is Windows-only; ignore if it fails
+if [ "${EASYTIER_SKIP_SERVICE:-0}" = "1" ]; then
+  warn "Skipping Windows service binary on Linux (EASYTIER_SKIP_SERVICE=1)."
+else
+  if cargo build --release --manifest-path src-tauri/Cargo.toml --bin easytier-service; then
+    pass "service binary built (host compatibility check)"
+  else
+    echo "service build failed; Linux package build aborted" >&2
+    exit 1
+  fi
+fi
 npm exec tauri -- build
 
 log "Collecting artifacts into $OUT_DIR/"
