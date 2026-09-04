@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf, process::{Child, Command, Stdio}, sync::Mutex};
+use wait_timeout::ChildExt;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -84,5 +85,19 @@ fn stop_instance(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -
 #[tauri::command]
 fn is_port_in_use(port: u16) -> bool { std::net::TcpListener::bind(("0.0.0.0", port)).is_err() }
 #[tauri::command]
-fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<String, String> { let (_, cli) = paths(runtime_dir); let o = Command::new(cli).args(args).output().map_err(|e| e.to_string())?; if o.status.success() { String::from_utf8(o.stdout).map_err(|e| e.to_string()) } else { Err(String::from_utf8_lossy(&o.stderr).to_string()) } }
+fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<String, String> {
+    let (_, cli) = paths(runtime_dir);
+    let mut child = Command::new(cli).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    // The CLI retries internally when the RPC portal is unreachable and can
+    // hang for a long time; cap each query so dead cores cannot pile up
+    // cli processes.
+    match child.wait_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Some(status)) => {
+            let o = child.wait_with_output().map_err(|e| e.to_string())?;
+            if status.success() { String::from_utf8(o.stdout).map_err(|e| e.to_string()) } else { Err(String::from_utf8_lossy(&o.stderr).to_string()) }
+        }
+        Ok(None) => { let _ = child.kill(); let _ = child.wait(); Err("状态查询超时（CLI 5 秒内未响应，核心可能已退出）".into()) }
+        Err(e) => Err(e.to_string()),
+    }
+}
 pub fn run() { tauri::Builder::default().manage(Mutex::new(RuntimeProcesses::default())).invoke_handler(tauri::generate_handler![detect_runtime, get_instance_state, start_instance, wait_for_exit, stop_instance, run_cli, is_port_in_use]).run(tauri::generate_context!()).expect("error while running tauri application"); }

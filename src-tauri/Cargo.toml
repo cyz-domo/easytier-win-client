@@ -15,3 +15,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 tauri = { version = "2", features = [] }
+wait-timeout = "0.2"

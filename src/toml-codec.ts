@@ -424,5 +424,9 @@ export function decodeTOML(text: string): NetworkConfig {
   }
 
   if (errors.length) throw new Error(errors.join('；'));
+  // Sections absent from the document must still yield usable arrays —
+  // encodeTOML reads them unconditionally.
+  cfg.proxy_cidrs ||= [];
+  cfg.port_forwards ||= [];
   return cfg as NetworkConfig;
 }

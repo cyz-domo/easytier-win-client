@@ -28,9 +28,16 @@ function nextRpcPort(instances: Instance[]): number {
 
 interface runtimeInfo { available: boolean; version: string; core_path?: string }
 
+// Status persisted in localStorage may be stale after an abnormal exit (the
+// backend child-process table is always empty on a fresh launch), so any
+// leftover transitional or running marker is healed to 'stopped'.
+const healStatus = (s: Status): Status => (s === 'starting' || s === 'stopping' || s === 'running' ? 'stopped' : s);
+
 export default function App() {
   const [instances, setInstances] = useState<Instance[]>(() =>
-    load('easytier.instances.v2', [{ id: crypto.randomUUID(), name: '我的网络', status: 'stopped', rpcPort: 15888, config: defaultConfig() }]));
+    load<Instance[]>('easytier.instances.v2', []).map(i => ({ ...i, status: healStatus(i.status) })).length
+      ? load<Instance[]>('easytier.instances.v2', []).map(i => ({ ...i, status: healStatus(i.status) }))
+      : [{ id: crypto.randomUUID(), name: '我的网络', status: 'stopped', rpcPort: 15888, config: defaultConfig() }]);
   const [activeId, setActiveId] = useState<string>(() => load('easytier.active.v2', ''));
   const [tab, setTab] = useState<Tab>('status');
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -45,6 +52,8 @@ export default function App() {
     load('easytier.peer-cols.v1', PEER_COLUMNS.filter(c => c.defaultOn).map(c => c.key)));
   const [refreshSecs, setRefreshSecs] = useState<RefreshInterval>(() => load('easytier.refresh.v1', 3));
   const [showDisplaySettings, setShowDisplaySettings] = useState(false);
+  const [tomlDraft, setTomlDraft] = useState<string | null>(null);
+  const [tomlError, setTomlError] = useState<string | null>(null);
   const logTimer = useRef<number | null>(null);
 
   const current = useMemo(() => instances.find(i => i.id === activeId) ?? instances[0], [instances, activeId]);
@@ -56,10 +65,13 @@ export default function App() {
   useEffect(() => { localStorage.setItem('easytier.peer-cols.v1', JSON.stringify(visibleCols)); }, [visibleCols]);
   useEffect(() => { localStorage.setItem('easytier.refresh.v1', JSON.stringify(refreshSecs)); }, [refreshSecs]);
 
-  // Poll peer/route status while an instance is running.
+  // Poll peer/route status while an instance is running. Self-scheduling
+  // timeout: the next round starts only after the previous one settles, so a
+  // hung CLI round can never pile up overlapping rounds.
   useEffect(() => {
     if (current?.status !== 'running') { setPeers([]); setRoutes([]); setNode(null); setStatusError(null); return; }
     let alive = true;
+    let timer: number | null = null;
     const refresh = async () => {
       try {
         const [peerText, routeText, nodeText] = await Promise.all([
@@ -74,11 +86,12 @@ export default function App() {
         setStatusError(null);
       } catch (e) {
         if (alive) setStatusError(String(e));
+      } finally {
+        if (alive) timer = window.setTimeout(() => void refresh(), refreshSecs * 1000);
       }
     };
     void refresh();
-    const t = window.setInterval(refresh, refreshSecs * 1000);
-    return () => { alive = false; window.clearInterval(t); };
+    return () => { alive = false; if (timer != null) window.clearTimeout(timer); };
   }, [current?.id, current?.status, current?.rpcPort, refreshSecs]);
 
   // Append runtime messages to the log pane.
@@ -149,7 +162,13 @@ export default function App() {
     setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, status: running ? 'stopping' : 'starting' } : i)));
     try {
       if (running) {
-        await invoke('stop_instance', { id: current.id });
+        // Race the kill against a timeout: if the backend never resolves (or
+        // the CLI bridge wedges), fail visibly instead of hanging in
+        // "stopping" forever. stop_instance is idempotent, so a late
+        // completion after a timeout needs no rollback.
+        const timeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('停止操作超时（5 秒）——可再次点击「停止网络」重试')), 5000));
+        await Promise.race([invoke('stop_instance', { id: current.id }), timeout]);
         setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, status: 'stopped' } : i)));
         addLog(`[${current.name}] 网络已停止`);
       } else {
@@ -221,6 +240,31 @@ export default function App() {
       if (f) await importToml(await f.text());
     };
     input.click();
+  };
+
+  const startTomlEdit = () => {
+    if (tomlDraft === null) setTomlDraft(encodeTOML(current.config));
+    setTomlError(null);
+  };
+
+  const applyTomlDraft = () => {
+    if (tomlDraft === null) return;
+    try {
+      const config = decodeTOML(tomlDraft);
+      const errors = validateConfig(config);
+      if (errors.length) throw new Error(errors[0].message);
+      setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, config } : i)));
+      setTomlDraft(null);
+      setTomlError(null);
+      addLog(`[${current.name}] TOML 已应用到表单`);
+    } catch (e) {
+      setTomlError(String(e instanceof Error ? e.message : e));
+    }
+  };
+
+  const revertTomlDraft = () => {
+    setTomlDraft(encodeTOML(current.config));
+    setTomlError(null);
   };
 
   if (!current) return null;
@@ -423,9 +467,20 @@ export default function App() {
               </div>
             </div>
             <ConfigEditor config={current.config} onChange={patchConfig} showAdvanced={showAdvanced} onToggleAdvanced={() => setShowAdvanced(x => !x)} />
-            <details className="toml-preview">
-              <summary>查看当前 TOML</summary>
-              <pre>{encodeTOML(current.config)}</pre>
+            <details className="toml-preview" onToggle={e => { if ((e.target as HTMLDetailsElement).open) startTomlEdit(); }}>
+              <summary>查看当前 TOML（可编辑）</summary>
+              <textarea
+                className="toml-editor"
+                value={tomlDraft ?? encodeTOML(current.config)}
+                onChange={e => setTomlDraft(e.target.value)}
+                spellCheck={false}
+                rows={18}
+              />
+              {tomlError && <p className="toml-error">✗ {tomlError}</p>}
+              <div className="toml-actions">
+                <button className="primary" onClick={applyTomlDraft}>应用更改</button>
+                <button className="ghost" onClick={revertTomlDraft}>还原</button>
+              </div>
             </details>
           </div>
         )}

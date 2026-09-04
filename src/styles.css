@@ -116,5 +116,9 @@ button.primary,button.stop{border:0;border-radius:8px;padding:10px 18px;font:inh
 .toml-preview{margin-top:14px}
 .toml-preview summary{font-size:12px;color:#1d6df2;cursor:pointer}
 .toml-preview pre{background:#f6f7f8;border:1px solid #edf0f3;border-radius:9px;padding:14px;font-size:11px;overflow-x:auto;margin-top:10px}
+.toml-editor{width:100%;box-sizing:border-box;background:#f6f7f8;border:1px solid #edf0f3;border-radius:9px;padding:14px;font-family:'Cascadia Code',Consolas,monospace;font-size:11px;line-height:1.5;color:#202124;resize:vertical;overflow:auto;margin-top:10px}
+.toml-editor:focus{outline:none;border-color:#1d6df2}
+.toml-error{color:#d93025;font-size:12px;margin:8px 0 0}
+.toml-actions{display:flex;gap:8px;margin-top:10px}
 .config-card-wide{max-width:100%}
 @media(max-width:860px){aside{width:200px}.content{padding:30px 24px}.config-grid{grid-template-columns:1fr}.grid-2,.grid-3{grid-template-columns:1fr}.status-meta{display:none}.metrics{grid-template-columns:1fr}}
