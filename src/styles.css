@@ -105,6 +105,13 @@ button.primary,button.stop{border:0;border-radius:8px;padding:10px 18px;font:inh
 .log-line{color:#c9d1d9;padding:2px 0;white-space:pre-wrap}
 .list-empty{color:#9aa0a6;font-size:12px;padding:10px 0;margin:0}
 .list-empty.err{color:#c74444}
+.warn-inline{color:#c77700;font-size:11px;margin:8px 0 0}
+.display-settings{display:flex;gap:26px;background:#f8f9fa;border:1px solid #edf0f3;border-radius:10px;padding:14px 18px;margin-bottom:14px;flex-wrap:wrap}
+.display-col-list{display:flex;gap:4px 14px;flex-wrap:wrap;margin-top:8px}
+.check-item{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#5f6368;cursor:pointer}
+.check-item input{accent-color:#1d6df2}
+.display-refresh{display:grid;gap:8px;align-content:start}
+.cell-sub{font-size:10px;color:#9aa0a6;margin-top:2px}
 .hint-inline{font-size:10px;color:#9aa0a6}
 .toml-preview{margin-top:14px}
 .toml-preview summary{font-size:12px;color:#1d6df2;cursor:pointer}

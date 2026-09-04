@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { defaultConfig, NetworkConfig, validateConfig } from './network-config';
 import { decodeTOML, encodeTOML } from './toml-codec';
 import { ConfigEditor } from './ConfigEditor';
-import { NodeStatus, PeerInfo, RouteInfo, formatBytes, parseNodeJSON, parsePeerJSON, parseRouteJSON } from './status-data';
+import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, parseNodeJSON, parsePeerJSON, parseRouteJSON } from './status-data';
 
 type Status = 'running' | 'stopped' | 'starting' | 'stopping' | 'failed';
 type Tab = 'status' | 'peers' | 'routes' | 'config' | 'logs' | 'settings';
@@ -41,6 +41,10 @@ export default function App() {
   const [logs, setLogs] = useState<string[]>([]);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [secretVisible, setSecretVisible] = useState(false);
+  const [visibleCols, setVisibleCols] = useState<PeerColumn[]>(() =>
+    load('easytier.peer-cols.v1', PEER_COLUMNS.filter(c => c.defaultOn).map(c => c.key)));
+  const [refreshSecs, setRefreshSecs] = useState<RefreshInterval>(() => load('easytier.refresh.v1', 3));
+  const [showDisplaySettings, setShowDisplaySettings] = useState(false);
   const logTimer = useRef<number | null>(null);
 
   const current = useMemo(() => instances.find(i => i.id === activeId) ?? instances[0], [instances, activeId]);
@@ -48,6 +52,9 @@ export default function App() {
   useEffect(() => { localStorage.setItem('easytier.instances.v2', JSON.stringify(instances)); }, [instances]);
   useEffect(() => { if (current) localStorage.setItem('easytier.active.v2', current.id); }, [current]);
   useEffect(() => { invoke<runtimeInfo>('detect_runtime', {}).then(v => setRuntime({ ...v, core_path: v.core_path ?? 'core/easytier-core.exe' })).catch(() => setRuntime(null)); }, []);
+
+  useEffect(() => { localStorage.setItem('easytier.peer-cols.v1', JSON.stringify(visibleCols)); }, [visibleCols]);
+  useEffect(() => { localStorage.setItem('easytier.refresh.v1', JSON.stringify(refreshSecs)); }, [refreshSecs]);
 
   // Poll peer/route status while an instance is running.
   useEffect(() => {
@@ -58,21 +65,21 @@ export default function App() {
         const [peerText, routeText, nodeText] = await Promise.all([
           invoke<string>('run_cli', { args: ['--rpc-portal', `127.0.0.1:${current.rpcPort}`, '--output', 'json', 'peer'] }),
           invoke<string>('run_cli', { args: ['--rpc-portal', `127.0.0.1:${current.rpcPort}`, '--output', 'json', 'route'] }),
-          invoke<string>('run_cli', { args: ['--rpc-portal', `127.0.0.1:${current.rpcPort}`, '--output', 'json', 'node', '--machine-id'] }).catch(() => ''),
+          invoke<string>('run_cli', { args: ['--rpc-portal', `127.0.0.1:${current.rpcPort}`, '--output', 'json', 'node'] }),
         ]);
         if (!alive) return;
         setPeers(parsePeerJSON(peerText));
         setRoutes(parseRouteJSON(routeText));
-        if (nodeText) setNode(parseNodeJSON(nodeText));
+        setNode(parseNodeJSON(nodeText));
         setStatusError(null);
       } catch (e) {
         if (alive) setStatusError(String(e));
       }
     };
     void refresh();
-    const t = window.setInterval(refresh, 3000);
+    const t = window.setInterval(refresh, refreshSecs * 1000);
     return () => { alive = false; window.clearInterval(t); };
-  }, [current?.id, current?.status, current?.rpcPort]);
+  }, [current?.id, current?.status, current?.rpcPort, refreshSecs]);
 
   // Append runtime messages to the log pane.
   const addLog = (line: string) => setLogs(xs => [...xs.slice(-300), `${new Date().toLocaleTimeString()}  ${line}`]);
@@ -216,8 +223,11 @@ export default function App() {
                 <span className="card-label">当前状态</span>
                 <h2>{statusText}</h2>
                 <p>{running ? `RPC 管理端口 127.0.0.1:${current.rpcPort}${node?.version ? ` · 核心 ${node.version}` : ''}` : '启动网络后，设备将加入 EasyTier 虚拟网络。'}</p>
+                {running && !node?.ipv4_addr && (
+                  <p className="warn-inline">⚠ 本机尚未获得虚拟 IPv4 —— 请在「组网配置 → 基础配置」勾选 DHCP 或手动填写虚拟 IPv4，然后重启网络（TUN 需要管理员权限运行客户端）。</p>
+                )}
               </div>
-              <div className="status-meta"><span>虚拟地址</span><b>{current.config.dhcp ? 'DHCP' : current.config.virtual_ipv4 || '—'}</b></div>
+              <div className="status-meta"><span>本机虚拟地址</span><b>{node?.ipv4_addr || (current.config.dhcp ? '等待分配' : current.config.virtual_ipv4 || '—')}</b></div>
             </div>
             <div className="metrics">
               <article><span>组网成员</span><strong>{running ? peers.length : '—'}</strong><small>{running ? '在线节点' : '未运行'}</small></article>
@@ -235,25 +245,85 @@ export default function App() {
 
         {tab === 'peers' && (
           <div className="card">
-            <h3 className="card-title">组网成员{running ? `（${peers.length}）` : ''}</h3>
+            <div className="card-title-row">
+              <h3 className="card-title">组网成员{running ? `（${peers.length}）` : ''}</h3>
+              <div className="title-actions">
+                <span className="hint-inline">刷新 {refreshSecs}s</span>
+                <button className="ghost" onClick={() => setShowDisplaySettings(x => !x)}>显示设置</button>
+              </div>
+            </div>
+            {showDisplaySettings && (
+              <div className="display-settings">
+                <div className="display-cols">
+                  <span className="field-label">数据项</span>
+                  <div className="display-col-list">
+                    {PEER_COLUMNS.map(c => (
+                      <label key={c.key} className="check-item">
+                        <input type="checkbox" checked={visibleCols.includes(c.key)}
+                          onChange={e => setVisibleCols(xs => e.target.checked ? [...xs, c.key] : xs.filter(x => x !== c.key))} />
+                        {c.label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="display-refresh">
+                  <span className="field-label">刷新</span>
+                  <select className="field-input narrow" value={refreshSecs}
+                    onChange={e => setRefreshSecs(parseInt(e.target.value, 10) as RefreshInterval)}>
+                    <option value={1}>1 秒</option>
+                    <option value={3}>3 秒</option>
+                    <option value={5}>5 秒</option>
+                    <option value={10}>10 秒</option>
+                    <option value={30}>30 秒</option>
+                  </select>
+                </div>
+              </div>
+            )}
             {!running && <p className="list-empty">网络未运行，启动后此处显示在线成员。</p>}
             {running && statusError && <p className="list-empty err">状态查询失败：{statusError}</p>}
             {running && !statusError && (
               <table className="data-table">
-                <thead><tr><th>节点 ID</th><th>主机名</th><th>虚拟地址</th><th>路径</th><th>延迟</th><th>收 / 发</th><th>协议</th></tr></thead>
+                <thead><tr>
+                  <th>节点 ID</th>
+                  {visibleCols.includes('ipv4') && <th>IPv4</th>}
+                  {visibleCols.includes('cidr') && <th>网段</th>}
+                  {visibleCols.includes('hostname') && <th>主机名</th>}
+                  {visibleCols.includes('cost') && <th>穿透方式</th>}
+                  {visibleCols.includes('proto') && <th>协议</th>}
+                  {visibleCols.includes('latency') && <th>延迟</th>}
+                  {visibleCols.includes('loss') && <th>丢包率</th>}
+                  {visibleCols.includes('rx') && <th>下载</th>}
+                  {visibleCols.includes('tx') && <th>上传</th>}
+                  {visibleCols.includes('nat') && <th>Nat类型</th>}
+                  {visibleCols.includes('version') && <th>内核版本</th>}
+                  {visibleCols.includes('relay') && <th>中继节点</th>}
+                  {visibleCols.includes('routes') && <th>子网路由</th>}
+                </tr></thead>
                 <tbody>
-                  {peers.map((p, i) => (
-                    <tr key={String(p.peer_id ?? i)}>
-                      <td>{String(p.peer_id ?? '—')}</td>
-                      <td>{String(p.hostname ?? '—')}</td>
-                      <td>{String(p.ipv4 ?? '—')}</td>
-                      <td>{String(p.cost ?? '—')}</td>
-                      <td>{p.latency_ms != null ? `${p.latency_ms} ms` : '—'}</td>
-                      <td>{formatBytes(p.rx_bytes)} / {formatBytes(p.tx_bytes)}</td>
-                      <td>{Array.isArray(p.tunnel_proto) ? p.tunnel_proto.join(',') : String(p.tunnel_proto ?? '—')}</td>
-                    </tr>
-                  ))}
-                  {peers.length === 0 && <tr><td colSpan={7} className="list-empty">暂无在线成员</td></tr>}
+                  {peers.map((p, i) => {
+                    const route = routes.find(r => r.hostname === p.hostname);
+                    const isLocal = p.cost === 'Local';
+                    const nodeType = isLocal ? '本机' : (route && (route.path_len ?? 0) > 1 ? '服务节点' : '普通节点');
+                    return (
+                      <tr key={String(p.id ?? i)}>
+                        <td>{String(p.id ?? '—')}<div className="cell-sub">{nodeType}</div></td>
+                        {visibleCols.includes('ipv4') && <td>{p.ipv4 || '—'}</td>}
+                        {visibleCols.includes('cidr') && <td>{p.cidr || '—'}</td>}
+                        {visibleCols.includes('hostname') && <td>{p.hostname || '—'}</td>}
+                        {visibleCols.includes('cost') && <td>{p.cost || '—'}</td>}
+                        {visibleCols.includes('proto') && <td>{p.tunnel_proto || '—'}</td>}
+                        {visibleCols.includes('latency') && <td>{p.lat_ms || '—'}</td>}
+                        {visibleCols.includes('loss') && <td>{p.loss_rate || '—'}</td>}
+                        {visibleCols.includes('rx') && <td>{formatBytes(p.rx_bytes)}</td>}
+                        {visibleCols.includes('tx') && <td>{formatBytes(p.tx_bytes)}</td>}
+                        {visibleCols.includes('nat') && <td>{p.nat_type || '—'}</td>}
+                        {visibleCols.includes('version') && <td>{p.version || '—'}</td>}
+                        {visibleCols.includes('relay') && <td>{route && (route.path_len ?? 0) > 1 ? route.next_hop_hostname : '—'}</td>}
+                        {visibleCols.includes('routes') && <td>{route?.proxy_cidrs && route.proxy_cidrs !== '' ? String(route.proxy_cidrs) : '—'}</td>}
+                      </tr>
+                    );
+                  })}
+                  {peers.length === 0 && <tr><td colSpan={14} className="list-empty">暂无在线成员</td></tr>}
                 </tbody>
               </table>
             )}
@@ -266,18 +336,20 @@ export default function App() {
             {!running && <p className="list-empty">网络未运行，启动后此处显示路由表。</p>}
             {running && (
               <table className="data-table">
-                <thead><tr><th>节点 ID</th><th>虚拟地址</th><th>下一跳</th><th>开销</th><th>代理网段</th></tr></thead>
+                <thead><tr><th>虚拟地址</th><th>主机名</th><th>下一跳</th><th>跳数</th><th>路径延迟</th><th>子网代理</th><th>版本</th></tr></thead>
                 <tbody>
                   {routes.map((r, i) => (
-                    <tr key={String(r.peer_id ?? i)}>
-                      <td>{String(r.peer_id ?? '—')}</td>
-                      <td>{String(r.ipv4_addr ?? '—')}</td>
-                      <td>{String(r.next_hop_peer_id ?? r.next_hop_ipv4 ?? '—')}</td>
-                      <td>{String(r.cost ?? '—')}</td>
-                      <td>{Array.isArray(r.proxy_cidrs) && r.proxy_cidrs.length ? r.proxy_cidrs.join(', ') : '—'}</td>
+                    <tr key={i}>
+                      <td>{r.ipv4 || '—'}</td>
+                      <td>{r.hostname || '—'}</td>
+                      <td>{r.next_hop_hostname || r.next_hop_ipv4 || '—'}</td>
+                      <td>{r.path_len ?? '—'}</td>
+                      <td>{r.path_latency ? `${r.path_latency} ms` : '—'}</td>
+                      <td>{r.proxy_cidrs && String(r.proxy_cidrs) !== '' ? String(r.proxy_cidrs) : '—'}</td>
+                      <td>{r.version || '—'}</td>
                     </tr>
                   ))}
-                  {routes.length === 0 && <tr><td colSpan={5} className="list-empty">暂无路由</td></tr>}
+                  {routes.length === 0 && <tr><td colSpan={7} className="list-empty">暂无路由</td></tr>}
                 </tbody>
               </table>
             )}
