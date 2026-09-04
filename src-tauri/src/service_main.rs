@@ -26,7 +26,10 @@ mod windows_service {
 
     pub fn run() -> Result<(), String> { service_dispatcher::start("EasyTierService", ffi_service_main).map_err(|e| e.to_string()) }
     fn service_main(args: Vec<std::ffi::OsString>) {
-        let _ = run_service(args);
+        if let Err(error) = run_service(args) {
+            let _ = std::fs::create_dir_all(config_store::data_dir());
+            let _ = std::fs::write(config_store::data_dir().join("service-startup.log"), format!("{error}\n"));
+        }
     }
 
     fn run_service(args: Vec<std::ffi::OsString>) -> Result<(), String> {

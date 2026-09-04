@@ -10,14 +10,17 @@
 
 !macro _EasyTierStopService
   DetailPrint "Stopping existing EasyTier Service..."
-  ; An upgrade must remove the old registration before create: sc.exe create
-  ; fails with ERROR_SERVICE_EXISTS and otherwise leaves the old binPath alive.
   nsExec::ExecToLog 'sc.exe stop EasyTierService'
   Pop $0
+  ; Give a normal service stop a chance to finish.
   Sleep 2000
+  ; If the service is stuck (for example in START_PENDING), terminate only
+  ; the process currently owned by this service, then remove its SCM entry.
+  nsExec::ExecToLog 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$s=Get-CimInstance Win32_Service -Filter \"Name=''EasyTierService''\" -ErrorAction SilentlyContinue; if($$s -and $$s.ProcessId -gt 0){Stop-Process -Id $$s.ProcessId -Force -ErrorAction SilentlyContinue}"'
+  Pop $0
+  Sleep 1000
   nsExec::ExecToLog 'sc.exe delete EasyTierService'
   Pop $0
-  ; Give SCM time to finish marking the old service for deletion.
   Sleep 1000
 !macroend
 
@@ -29,7 +32,7 @@
   ; Dump the resolver to a temp .ps1: avoids NSIS quote-escaping pitfalls.
   FileOpen $1 "$PLUGINSDIR\resolve-sid.ps1" w
   FileWrite $1 "$$o = Get-CimInstance Win32_Process | Where-Object Name -eq 'explorer.exe' | Select-Object -First 1$\r$\n"
-  FileWrite $1 "$$u = $$o | ForEach-Object { $$_.GetOwner() }$\r$\n"
+  FileWrite $1 "$$u = Invoke-CimMethod -InputObject $$o -MethodName GetOwner$\r$\n"
   FileWrite $1 "(New-Object System.Security.Principal.NTAccount($$u.Domain, $$u.User)).Translate([System.Security.Principal.SecurityIdentifier]).Value$\r$\n"
   FileClose $1
   nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\resolve-sid.ps1"'
