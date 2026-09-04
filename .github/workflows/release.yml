@@ -1,13 +1,7 @@
-name: Build Windows Release
+name: Build Windows Release (manual)
 
-# ① 触发方式
+# 只手动触发
 on:
-  # 这里监听任何分支的 push（* 代表 all branches）
-  push:
-    branches:
-      - '*'
-  
-  # 手动触发，可在输入框里填写要构建的分支（默认 main）
   workflow_dispatch:
     inputs:
       branch:
@@ -27,11 +21,8 @@ jobs:
             triple: aarch64-pc-windows-msvc
 
     env:
-      # 根据触发方式决定 checkout 的分支：
-      # ① 手动触发时使用输入的 branch；
-      # ② push 触发时使用被 push 的分支名
-      BUILD_BRANCH: |
-        ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref_name }}
+      # 使用 workflow_dispatch 时读取输入分支
+      BUILD_BRANCH: ${{ github.event.inputs.branch || 'main' }}
 
     steps:
       - name: Checkout code
@@ -59,15 +50,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
-          # 路径可按项目实际情况调整
           path: src-tauri/target/**/release/*.exe
 
-  # -------------------------------------------------
-  # Release 仅在 main 推送或手动触发时进行
-  # -------------------------------------------------
   deploy:
     needs: build
-    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download Artifacts
