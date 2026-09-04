@@ -98,3 +98,22 @@ export function formatBytes(n: number | string | undefined): string {
   return `${(v / 1024 ** 3).toFixed(2)} GB`;
 }
 
+export type StatusTone = 'connected' | 'connecting' | 'error' | 'local' | 'muted';
+
+export function routeTone(cost: string | number | undefined): StatusTone {
+  const value = String(cost ?? '').trim().toLowerCase();
+  if (value === 'local' || value === '0') return 'local';
+  if (value === 'p2p' || value === '1') return 'connected';
+  if (value.startsWith('relay') || /^\d+$/.test(value)) return 'connecting';
+  return 'muted';
+}
+
+export function latencyTone(value: string | number | undefined): StatusTone {
+  if (value == null || value === '' || value === '-') return 'muted';
+  const ms = typeof value === 'number' ? value : parseFloat(String(value).replace(/[^\d.]/g, ''));
+  if (Number.isNaN(ms)) return 'muted';
+  if (ms <= 50) return 'connected';
+  if (ms <= 150) return 'connecting';
+  return 'error';
+}
+

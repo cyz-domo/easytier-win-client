@@ -14,7 +14,7 @@ nav{display:grid;gap:4px}
 .nav-item{height:42px;border-radius:9px;padding:0 12px;display:flex;align-items:center;gap:10px;color:#5f6368;font-size:13px}
 .nav-item.active{background:#eef4ff;color:#1d6df2;font-weight:600}
 .dot{width:7px;height:7px;border-radius:50%;background:#c7cbd1;flex:none}
-.dot.on{background:#2bb673}.dot.err{background:#e05252}
+.dot.on{background:#34c759}.dot.connecting{background:#ff9500}.dot.err{background:#ff3b30}
 .chevron{margin-left:auto;font-size:18px;color:#aeb4bc}
 .add-button{color:#1d6df2;font-size:13px;padding:15px 12px}
 .sidebar-bottom{margin-top:auto;display:grid;gap:16px}
@@ -40,6 +40,10 @@ button.primary,button.stop{border:0;border-radius:8px;padding:10px 18px;font:inh
 .status-icon{width:39px;height:39px;border-radius:50%;display:grid;place-items:center;background:#f1f3f5;color:#a0a5ac;font-size:22px;flex:none}
 .card-label{display:block;font-size:10px;margin-bottom:5px}
 .status-card h2{font-size:15px}
+.status-card.status-connected .status-icon{background:#34c7591f;color:#34c759}
+.status-card.status-connecting .status-icon{background:#ff95001f;color:#ff9500}
+.status-card.status-error .status-icon{background:#ff3b301f;color:#ff3b30}
+.status-card.status-connected h2{color:#269c45}.status-card.status-connecting h2{color:#c87400}.status-card.status-error h2{color:#d93025}
 .status-card p,.section-heading p,.hint{color:#9aa0a6;font-size:11px;margin:6px 0 0}
 .status-meta{margin-left:auto;border-left:1px solid #eef0f2;padding-left:30px;display:grid;gap:6px}
 .status-meta span{font-size:10px;color:#9aa0a6}
@@ -112,6 +116,9 @@ button.primary,button.stop{border:0;border-radius:8px;padding:10px 18px;font:inh
 .check-item input{accent-color:#1d6df2}
 .display-refresh{display:grid;gap:8px;align-content:start}
 .cell-sub{font-size:10px;color:#9aa0a6;margin-top:2px}
+.route-badge{display:inline-block;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:600}
+.tone-connected{color:#269c45}.tone-connecting{color:#c87400}.tone-error{color:#d93025}.tone-local{color:#1d6df2}.tone-muted{color:#9aa0a6}
+.route-badge.tone-connected{background:#34c75922}.route-badge.tone-connecting{background:#ff950022}.route-badge.tone-error{background:#ff3b3022}.route-badge.tone-local{background:#1d6df21a}.route-badge.tone-muted{background:#f1f3f5}
 .hint-inline{font-size:10px;color:#9aa0a6}
 .toml-preview{margin-top:14px}
 .toml-preview summary{font-size:12px;color:#1d6df2;cursor:pointer}

@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { defaultConfig, listenersForInstance, NetworkConfig, validateConfig } from './network-config';
 import { decodeTOML, encodeTOML } from './toml-codec';
 import { ConfigEditor } from './ConfigEditor';
-import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, parseNodeJSON, parsePeerJSON, parseRouteJSON } from './status-data';
+import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, latencyTone, parseNodeJSON, parsePeerJSON, parseRouteJSON, routeTone } from './status-data';
 
 type Status = 'running' | 'stopped' | 'starting' | 'stopping' | 'failed';
 type Tab = 'status' | 'peers' | 'routes' | 'config' | 'logs' | 'settings';
@@ -291,7 +291,7 @@ export default function App() {
         <nav>
           {instances.map(i => (
             <button className={i.id === current.id ? 'nav-item active' : 'nav-item'} onClick={() => { setActiveId(i.id); setTab('status'); }} key={i.id}>
-              <span className={i.status === 'running' ? 'dot on' : i.status === 'failed' ? 'dot err' : 'dot'} />{i.name}
+              <span className={i.status === 'running' ? 'dot on' : i.status === 'failed' ? 'dot err' : i.status === 'starting' || i.status === 'stopping' ? 'dot connecting' : 'dot'} />{i.name}
               <span className="chevron">›</span>
             </button>
           ))}
@@ -325,8 +325,8 @@ export default function App() {
 
         {tab === 'status' && (
           <>
-            <div className="status-card">
-              <div className="status-icon">{running ? '✓' : '−'}</div>
+            <div className={`status-card status-${running ? 'connected' : current.status === 'failed' ? 'error' : current.status === 'starting' || current.status === 'stopping' ? 'connecting' : 'muted'}`}>
+              <div className="status-icon">{running ? '✓' : current.status === 'failed' ? '!' : current.status === 'starting' || current.status === 'stopping' ? '…' : '−'}</div>
               <div>
                 <span className="card-label">当前状态</span>
                 <h2>{statusText}</h2>
@@ -418,15 +418,15 @@ export default function App() {
                         {visibleCols.includes('ipv4') && <td>{p.ipv4 || '—'}</td>}
                         {visibleCols.includes('cidr') && <td>{p.cidr || '—'}</td>}
                         {visibleCols.includes('hostname') && <td>{p.hostname || '—'}</td>}
-                        {visibleCols.includes('cost') && <td>{p.cost || '—'}</td>}
+                        {visibleCols.includes('cost') && <td><span className={`route-badge tone-${routeTone(p.cost)}`}>{p.cost || '—'}</span></td>}
                         {visibleCols.includes('proto') && <td>{p.tunnel_proto || '—'}</td>}
-                        {visibleCols.includes('latency') && <td>{p.lat_ms || '—'}</td>}
+                        {visibleCols.includes('latency') && <td className={`tone-${latencyTone(p.lat_ms)}`}>{p.lat_ms || '—'}</td>}
                         {visibleCols.includes('loss') && <td>{p.loss_rate || '—'}</td>}
                         {visibleCols.includes('rx') && <td>{formatBytes(p.rx_bytes)}</td>}
                         {visibleCols.includes('tx') && <td>{formatBytes(p.tx_bytes)}</td>}
                         {visibleCols.includes('nat') && <td>{p.nat_type || '—'}</td>}
                         {visibleCols.includes('version') && <td>{p.version || '—'}</td>}
-                        {visibleCols.includes('relay') && <td>{route && (route.path_len ?? 0) > 1 ? route.next_hop_hostname : '—'}</td>}
+                        {visibleCols.includes('relay') && <td><span className={`route-badge tone-${routeTone(route && (route.path_len ?? 0) > 1 ? `Relay (${route.path_len})` : 'Local')}`}>{route && (route.path_len ?? 0) > 1 ? route.next_hop_hostname : '—'}</span></td>}
                         {visibleCols.includes('routes') && <td>{route?.proxy_cidrs && route.proxy_cidrs !== '' ? String(route.proxy_cidrs) : '—'}</td>}
                       </tr>
                     );
@@ -452,7 +452,7 @@ export default function App() {
                       <td>{r.hostname || '—'}</td>
                       <td>{r.next_hop_hostname || r.next_hop_ipv4 || '—'}</td>
                       <td>{r.path_len ?? '—'}</td>
-                      <td>{r.path_latency ? `${r.path_latency} ms` : '—'}</td>
+                      <td className={`tone-${latencyTone(r.path_latency)}`}>{r.path_latency ? `${r.path_latency} ms` : '—'}</td>
                       <td>{r.proxy_cidrs && String(r.proxy_cidrs) !== '' ? String(r.proxy_cidrs) : '—'}</td>
                       <td>{r.version || '—'}</td>
                     </tr>
