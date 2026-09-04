@@ -1,164 +1,356 @@
-# EasyTier Windows 后台服务与权限管理设计
+# EasyTier Windows 后台服务实施方案（修订版）
 
 日期：2026-09-05
 项目：easytier-win-client
-状态：架构已获用户确认，等待文档审阅
+状态：根据 grill-me 审核意见修订
 
-## 背景与目标
+## 1. 目标与非目标
 
-当前 Tauri GUI 直接启动 `easytier-core.exe`。创建 TUN 网卡需要管理员权限，因此用户可能看到控制台窗口、遇到 UAC 权限问题，且 GUI 退出后无法继续管理网络。目标是将需要高权限的运行管理迁移到独立 Windows Service：
+### 目标
 
-- GUI 以普通用户权限运行；
-- NSIS 安装时申请一次 UAC，自动注册并启动后台服务；
-- 服务常驻但默认不自动启动任何网络；
-- 用户可在设置页和系统托盘中为实例配置“开机自动启动”；
-- GUI 后续通过本机 IPC 请求服务启停网络，不重复弹 UAC；
-- 内核更新、TUN 创建和 core 进程管理统一由服务执行；
-- GUI 关闭后隐藏到托盘，服务和网络不受影响。
+- GUI 以普通用户权限运行，不因创建 TUN 网卡而反复触发 UAC。
+- 首次安装 NSIS 安装包时注册并启动后台服务。
+- 服务开机常驻，但默认不自动启动网络。
+- 每个网络实例独立配置 `auto_start`，可在设置页和托盘切换。
+- GUI 通过本机 Named Pipe 控制服务。
+- 服务负责 core 启停、TUN 相关运行、内核更新和更新后的网络恢复。
+- GUI 关闭到托盘后，服务和网络继续运行。
 
-## 用户已确认的规则
-
-- 服务开机常驻。
-- 默认不自动启动网络。
-- 在设置页/托盘配置是否自动启动网络。
-- 安装器自动注册服务。
-- 采用独立 `easytier-service.exe` + 本机命名管道 IPC。
-- 不把 GUI 本身注册为 Windows Service。
-
-## 架构
-
-### GUI
-
-`easytier-win-client.exe` 以普通用户权限运行，负责：
-
-- Tauri WebView 窗口、系统托盘和设置界面；
-- 实例配置、显示状态、日志和更新进度；
-- 连接 `\\.\\pipe\\EasyTierService`；
-- 将实例配置快照同步给服务；
-- 将服务返回的状态映射到现有前端状态模型。
-
-GUI 不再直接对 core 执行启动、停止、更新和文件替换操作。
-
-### Windows Service
-
-新增 `easytier-service.exe`，作为独立 Windows 服务运行，负责：
-
-- 服务注册后的常驻 IPC 监听；
-- 以服务权限启动/停止 `easytier-core.exe`；
-- 管理多实例 child process、TUN 和进程退出回收；
-- 执行内核下载、校验、备份、替换和自动重启；
-- 保存服务状态与开机自动启动实例；
-- 在服务启动时只恢复 `auto_start=true` 的实例，默认不启动任何实例。
-
-服务只能使用安装目录下经过固定规则解析的 core 路径，不接受客户端传入的任意可执行文件路径。
-
-## IPC 协议
-
-使用 Windows Named Pipe，不开放 TCP 端口。命名管道默认只允许本机交互用户访问，服务端再次校验客户端身份和请求字段。
-
-请求使用结构化 JSON，每条请求包含 `id`、`command` 和 `payload`。第一版命令范围：
-
-- `service_status`：返回服务运行状态、版本和管理能力；
-- `sync_instance`：同步实例 id、TOML 配置、RPC 端口和 `auto_start`；
-- `remove_instance`：移除服务端实例配置；
-- `start_instance` / `stop_instance`：启停指定实例；
-- `list_instances`：返回实例状态、PID 和最近错误；
-- `update_kernel`：执行内核更新并返回进度事件；
-- `set_auto_start`：设置指定实例的开机自动启动标记。
-
-响应包含对应请求 id、成功/失败标记、错误消息和可选数据。长任务（内核更新）通过同一管道推送事件，GUI 也可以在重新连接后通过 `list_instances` 获取最终状态。
-
-服务端必须：
-
-- 拒绝路径穿越和任意 exe 路径；
-- 限制请求大小和单连接并发；
-- 对实例 id、端口、TOML 配置做基本校验；
-- 更新和启停使用互斥锁；
-- 服务重启后清理失效 PID，不把旧进程状态伪报为运行中。
-
-## 服务生命周期与安装
-
-### NSIS 安装版
-
-- 安装包包含 GUI、`easytier-service.exe` 和完整 `core/` 运行时。
-- 安装阶段执行服务安装命令，服务显示名为 `EasyTier Service`，服务名为 `EasyTierService`。
-- 服务启动类型为 Automatic，安装完成后启动服务。
-- 卸载阶段先停止服务及其管理的 core，再删除服务和服务文件。
-- 安装/卸载操作由 NSIS 以管理员权限执行并显示标准 UAC 提示。
-
-### 便携版
-
-- 不自动注册服务。
-- 设置页显示“安装后台服务”按钮；点击后通过一次提权 helper 注册当前目录下的 service executable。
-- 便携目录不可写或移动后，服务状态显示路径失效，并提供重新注册入口。
-
-### 服务不可用
-
-GUI 启动后检查命名管道：
-
-- 可连接：所有网络操作走服务；
-- 服务未安装：设置页显示安装按钮；
-- 服务已安装但未运行：显示启动/修复按钮；
-- IPC 连接失败：禁止假报启动成功，保留明确错误，并可重新连接。
-
-## 开机自动启动
-
-每个实例增加 `auto_start: boolean`，默认 `false`。配置存储从仅有 localStorage 逐步迁移为用户配置目录中的服务可读 JSON/TOML 快照：
-
-- GUI 编辑配置时通过 `sync_instance` 同步；
-- 用户在设置页或托盘切换开关时同步 `auto_start`；
-- 服务启动后读取持久化快照，只启动 `auto_start=true` 的实例；
-- 用户手动停止网络不清除 `auto_start` 偏好，只影响当前运行状态；
-- 自动启动失败写入服务日志，GUI 下次连接后可见。
-
-## TUN 与权限行为
-
-- GUI 不设置 `requireAdministrator`，避免每次打开主界面都弹 UAC。
-- 服务以合适的服务账户运行并拥有创建 TUN 所需权限；具体使用 LocalSystem 还是受限服务账户在实现阶段根据驱动安装要求验证，默认优先最小权限。
-- TUN 驱动/依赖文件由安装器或服务首次启动阶段部署，部署失败明确提示并停止启动该实例。
-- 服务启动 core 时隐藏控制台窗口，GUI 仅显示结构化状态和日志。
-
-## 内核更新联动
-
-内核更新请求全部转给服务：
-
-1. GUI 发送代理选择和更新请求；
-2. 服务检查正式 Release、下载并报告全局进度；
-3. 服务记录并停止当前运行实例；
-4. 服务校验完整 core 压缩包，备份旧 core 后替换；
-5. 服务按更新前快照恢复正在运行的实例；
-6. GUI 订阅进度和最终实例状态。
-
-更新期间服务拒绝并发启停请求。GUI 退出不会中断服务更新或网络运行。
-
-## 迁移策略
-
-第一次启用服务时：
-
-- GUI 查询服务状态；
-- 若发现旧版本 GUI 自己启动的 core，提示用户停止旧实例后再接管；
-- 服务接管前不强杀未知来源的进程；
-- 接管成功后由服务重新按同步配置启动；
-- 无法确认归属时保持现状并给出人工处理提示。
-
-现有 `easytier.instances.v2` localStorage 配置作为迁移输入，成功同步后服务端保存自己的快照。迁移期间保留旧数据，不因服务安装失败而删除。
-
-## 测试与验收
-
-- 服务安装、启动、停止、卸载流程均能正确返回结果。
-- 普通权限 GUI 可连接命名管道并启停需要 TUN 的网络，无重复 UAC。
-- 服务重启后默认不启动网络；仅 `auto_start=true` 的实例自动启动。
-- 托盘关闭 GUI 后，服务和网络继续运行；重新打开 GUI 可恢复状态。
-- 多实例启停、状态查询和错误回收正常。
-- IPC 拒绝非法路径、超大请求、无效实例 id 和未授权客户端。
-- 内核更新由服务完成，更新期间 GUI 进度全局显示，完成后原运行网络恢复。
-- 安装包包含 GUI、service executable、core 和驱动依赖；便携版按需注册服务。
-- 服务不可用时 GUI 显示可操作错误，不假报网络已启动。
-
-## 范围外
+### 非目标
 
 - 不把 GUI 注册为 Windows Service。
-- 不开放远程 TCP 管理接口。
-- 不在本次实现远程机器管理或账户认证。
-- 不默认自动启动网络。
+- 不开放 TCP 管理端口或远程控制接口。
+- 不由服务直接覆盖正在运行的 service exe；service 更新只通过安装器完成。
 - 不在本次提供内核历史版本回滚 UI。
+
+## 2. 总体架构与迁移阶段
+
+### 2.1 二进制布局
+
+当前 `src-tauri` 改为包含两个 binary，并抽取共享模块：
+
+```text
+src-tauri/
+  src/main.rs                 # Tauri GUI binary
+  src/service_main.rs         # Windows Service binary
+  src/runtime_manager.rs      # core 子进程与实例状态
+  src/ipc.rs                  # 请求/响应/事件 schema 与 Named Pipe
+  src/kernel_updater.rs       # 下载、校验、替换 core
+  src/config_store.rs         # ProgramData 配置与原子持久化
+```
+
+`Cargo.toml`：
+
+```toml
+[[bin]]
+name = "easytier-win-client"
+path = "src/main.rs"
+
+[[bin]]
+name = "easytier-service"
+path = "src/service_main.rs"
+```
+
+GUI、service、更新器共享数据结构和纯函数，但只有 service 能操作高权限 core 进程。
+
+### 2.2 两阶段迁移
+
+为避免两套进程管理器同时工作，按以下阶段实施：
+
+**阶段 A：兼容桥接**
+
+- 新增 service 和 IPC。
+- GUI 启动时检查 service 状态。
+- service 可用时，启停/状态/更新全部走 IPC。
+- service 不可用时，GUI 暂时保留旧的直接管理模式，并在设置页明确显示“兼容模式”；兼容模式仍受现有 UAC/权限限制。
+- 同一个实例禁止同时出现在 GUI 进程表和 service 进程表。
+
+**阶段 B：默认服务模式**
+
+- NSIS 安装版默认只走 service。
+- 兼容模式只作为一次性迁移和诊断后备，不在普通 UI 中静默使用。
+- 首次成功同步后，service 成为实例唯一 owner。
+
+实例状态分为：
+
+```text
+desired_state: stopped | running
+auto_start: bool
+observed_state: stopped | starting | running | stopping | failed
+owner: service | legacy-gui
+```
+
+`desired_state` 不从瞬时 `observed_state` 推导，避免服务重启后状态伪造。
+
+## 3. Windows Service SCM 生命周期
+
+### 3.1 服务配置
+
+服务名：`EasyTierService`；显示名：`EasyTier Service`。
+
+- 启动类型：`SERVICE_AUTO_START`。
+- 错误策略：`SERVICE_ERROR_NORMAL`。
+- 服务账户：优先使用受限服务账户；如果 TUN/驱动要求验证不通过，再使用 `LocalSystem`，并收紧所有配置和 IPC ACL。
+- 服务启动后只监听 IPC，不启动任何 `auto_start=false` 实例。
+- 服务停止时停止所有由它拥有的 core，并等待进程退出。
+- 服务接收 SCM stop/shutdown 通知后，停止接受新请求，完成清理，再报告 stopped。
+
+### 3.2 安装、升级、卸载
+
+NSIS 安装器包含：
+
+```text
+EasyTier.exe
+easytier-service.exe
+core/easytier-core.exe
+core/easytier-cli.exe
+core/wintun.dll
+core/WinDivert64.sys
+core/Packet.dll
+其他官方压缩包中的依赖文件
+```
+
+安装流程：
+
+```text
+停止旧 EasyTierService（若存在）
+→ 写入 GUI/service/core 文件
+→ sc.exe create EasyTierService binPath= "...\\easytier-service.exe"
+→ 设置 description、启动类型和恢复策略
+→ 启动 EasyTierService
+→ 检查 service_status
+```
+
+任一步失败，安装器报告错误；已有可用版本不能被删除或覆盖成半安装状态。
+
+升级流程：
+
+```text
+停止网络
+→ 停止旧 service
+→ 替换 GUI/service/core
+→ 保留 ProgramData 配置
+→ 注册/更新服务配置
+→ 启动新 service
+→ 按 desired_state/auto_start 恢复
+```
+
+卸载流程：
+
+```text
+通知 service 停止网络
+→ sc.exe stop EasyTierService 并等待
+→ sc.exe delete EasyTierService
+→ 删除 service、GUI 和安装目录文件
+→ 保留用户配置和日志，除非用户明确选择删除
+```
+
+服务 exe 被占用时，卸载器先等待并重试；失败则中止删除并明确提示，不强行留下损坏状态。
+
+便携版不自动注册服务，设置页提供“安装后台服务”按钮，通过一次 UAC helper 注册当前目录中的 service exe；目录移动后显示路径失效并提供重新注册。
+
+## 4. Named Pipe IPC 安全与协议
+
+### 4.1 管道安全
+
+管道名：`\\.\\pipe\\EasyTierService`。
+
+服务创建管道时显式设置安全描述符，只允许：
+
+- 当前安装/交互用户 SID；
+- `BUILTIN\\Administrators`；
+- `NT AUTHORITY\\SYSTEM`。
+
+拒绝普通其他本地用户。服务连接后取得客户端 token/PID，校验调用者属于允许 SID；不相信客户端自报的用户名或角色。限制单连接请求大小为 1 MiB，单连接串行处理，服务端限制总连接数。
+
+服务永不接受客户端传入的任意 exe 路径。core/service 路径由服务安装目录解析，并使用 canonical path 校验在允许目录内。
+
+### 4.2 消息格式
+
+管道使用 UTF-8、按行分隔的 JSON，一行一个请求/响应；单行最大 1 MiB。
+
+请求：
+
+```json
+{
+  "protocol_version": 1,
+  "request_id": "uuid",
+  "command": "start_instance",
+  "payload": {
+    "instance_id": "uuid",
+    "config_revision": 3
+  }
+}
+```
+
+响应：
+
+```json
+{
+  "protocol_version": 1,
+  "request_id": "uuid",
+  "ok": true,
+  "data": {},
+  "error": null
+}
+```
+
+错误使用稳定错误码：`service_unavailable`、`invalid_request`、`unauthorized`、`instance_not_found`、`busy`、`core_not_found`、`port_conflict`、`operation_timeout`、`update_failed`。
+
+长任务事件：
+
+```json
+{
+  "protocol_version": 1,
+  "event": "kernel_update_progress",
+  "task_id": "uuid",
+  "phase": "downloading",
+  "downloaded_bytes": 123,
+  "total_bytes": 456,
+  "percent": 26,
+  "message": "正在下载内核"
+}
+```
+
+必须提供：
+
+- `service_status`；
+- `list_instances`；
+- `sync_instance`；
+- `remove_instance`；
+- `start_instance`；
+- `stop_instance`；
+- `set_auto_start`；
+- `update_kernel`；
+- `get_task_status`。
+
+请求具有幂等语义：同一 `request_id` 重试返回原结果；重复 start/stop 不产生第二个 core。更新任务拥有 `task_id`，GUI 断线重连后可查询最终状态，不能永久 loading。
+
+## 5. 配置存储与 ACL
+
+service 不读取 WebView localStorage。权威配置目录：
+
+```text
+%ProgramData%\\EasyTier\\
+  instances.json
+  service-state.json
+  logs\\service.log
+  backups\\
+```
+
+配置文件 ACL：
+
+- service 账户拥有读写；
+- Administrators 可维护；
+- 交互用户仅通过 IPC 读写，不直接开放任意用户写权限。
+
+GUI 首次连接 service 时迁移 `localStorage.easytier.instances.v2`：
+
+1. 读取并校验实例 id、端口、TOML；
+2. 生成 `instances.json` 临时文件；
+3. fsync 后原子 rename；
+4. service 返回迁移成功；
+5. 原 localStorage 保留作为回退，不因失败删除。
+
+每个实例保存：
+
+```json
+{
+  "id": "uuid",
+  "name": "我的网络",
+  "config_toml": "...",
+  "rpc_port": 15888,
+  "auto_start": false,
+  "desired_state": "stopped",
+  "last_error": null
+}
+```
+
+网络密钥只出现在受 ACL 保护的配置文件和受控 IPC payload 中；日志禁止打印完整 TOML 和密钥。
+
+## 6. 网络启停与 TUN 权限
+
+- GUI 不设置 `requireAdministrator`。
+- service 以服务账户启动 core，并使用 `CREATE_NO_WINDOW`。
+- service 是每个实例唯一进程 owner，启动前校验配置和端口，启动后记录 PID/句柄。
+- core 自行退出时，service 回收句柄、设置 `observed_state=failed` 并保存错误。
+- 停止操作以句柄和 PID 为准，不按进程名误杀其他 EasyTier 实例。
+- TUN/驱动部署由安装器完成，service 启动时只做存在性和版本检查；缺失时禁止启动并给出明确错误。
+
+## 7. 开机自动启动与托盘
+
+- service 启动后默认只加载配置，不启动网络。
+- 仅 `auto_start=true` 且 `desired_state=running` 的实例按顺序启动。
+- 实例启动失败不阻塞其它实例；保存错误并允许 GUI 重试。
+- 用户手动停止只改变当前 `desired_state`，是否保留 `auto_start` 由设置页明确控制；默认保留偏好。
+- GUI 关闭按钮：隐藏窗口到托盘。
+- 托盘退出：只退出 GUI，不停止 service 或网络。
+- 托盘提供：打开主窗口、启停当前实例、切换 auto_start、打开设置、退出 GUI。
+- service 不可用时托盘显示离线状态，禁止假报运行中。
+
+## 8. 内核更新边界
+
+- 更新任务由 service 执行，GUI 只提交代理选择并订阅事件。
+- 只更新 `core/`；`easytier-service.exe` 的更新走安装器。
+- service 记录运行前快照，拒绝并发启停。
+- 下载到 ProgramData 临时目录，校验资产、架构、版本和必需文件后才替换。
+- 停止 core 后备份旧 `core/`，原子替换新目录。
+- 替换失败自动恢复备份；恢复失败明确标记 service degraded。
+- 按快照恢复原来运行中的实例；停止的实例保持停止。
+- GUI 断线不影响任务；重连后 `get_task_status` 返回结果。
+
+## 9. 服务不可用与兼容模式
+
+GUI 启动执行：
+
+```text
+service_status
+→ 成功：进入 service mode
+→ 未安装：显示安装服务
+→ 已安装未运行：显示启动/修复服务
+→ IPC 失败：显示明确错误，不假报网络启动
+```
+
+兼容模式仅在迁移阶段保留，并且必须显示横幅；同一实例 owner 冲突时拒绝操作，要求用户先停止旧 GUI core，再接管到 service。
+
+## 10. 测试与验收
+
+### 单元测试
+
+- IPC JSON schema、版本兼容、消息大小限制。
+- SID/ACL 构造与拒绝未授权用户。
+- 请求幂等、重复 start/stop、任务查询。
+- 配置原子写入、损坏恢复、密钥不出现在日志。
+- 服务路径 canonical 校验和路径穿越拒绝。
+- x64/ARM64 core 资产和驱动检查。
+
+### 集成测试
+
+- NSIS 安装、升级、卸载和服务恢复。
+- 服务重启后默认不启网，auto_start 实例按顺序恢复。
+- 普通权限 GUI 启停 TUN 网络不重复弹 UAC。
+- GUI 关闭到托盘后网络继续运行。
+- GUI 退出后重新连接能取回实例状态和更新任务状态。
+- 更新中断、下载失败、校验失败、core 被占用、目录不可写时旧版本可用。
+- service exe 更新只通过安装器完成。
+
+### 手工验收
+
+- x64 和 ARM64 安装包均包含 GUI、service、core 和依赖。
+- 服务控制台不可见，GUI 只有一个前端窗口。
+- 设置页和托盘切换 auto_start 后，重启 Windows 行为符合配置。
+- 多实例同时运行、更新和恢复无端口冲突。
+- 非管理员普通本地用户不能通过 Named Pipe 控制服务。
+
+## 11. 实施顺序
+
+1. 抽取 `runtime_manager` 和 IPC schema。
+2. 增加 `easytier-service.exe` 与 SCM 生命周期。
+3. 实现 Named Pipe ACL、请求/响应和 task status。
+4. 实现 ProgramData 配置迁移与原子持久化。
+5. GUI 增加 service client，完成阶段 A 兼容桥接。
+6. 将内核更新和 core 启停迁移到 service。
+7. 完成 NSIS 安装/升级/卸载脚本及 service binary 打包。
+8. 完成托盘 auto_start 操作和全局状态同步。
+9. 集成测试后默认切换到 service mode。
+10. 最后再考虑移除 legacy GUI 直启路径。
