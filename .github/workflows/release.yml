@@ -10,6 +10,16 @@ on:
         default: main
         required: false
         type: string
+      publish_release:
+        description: Publish a GitHub Release after build
+        default: false
+        required: false
+        type: boolean
+      release_tag:
+        description: Release tag when publishing (e.g. v0.1.0); required if publish_release is true
+        default: ''
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -103,9 +113,15 @@ jobs:
             easytier-win-client_${{ matrix.arch }}_portable.zip
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Publish on tag push, or on manual dispatch with publish_release=true
+    # (and a release_tag for manual runs).
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      || (github.event_name == 'workflow_dispatch' && inputs.publish_release && inputs.release_tag != '')
     needs: build
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -116,6 +132,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           generate_release_notes: true
           files: |
             artifacts/**/*.exe
