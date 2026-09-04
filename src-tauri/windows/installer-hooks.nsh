@@ -35,9 +35,9 @@
   StrCpy $R8 ""
   ; Dump the resolver to a temp .ps1: avoids NSIS quote-escaping pitfalls.
   FileOpen $1 "$PLUGINSDIR\resolve-sid.ps1" w
-  FileWrite $1 "$o = Get-CimInstance Win32_Process -Filter `"Name='explorer.exe'`" | Select-Object -First 1$\n"
-  FileWrite $1 "$u = $o | ForEach-Object { $_.GetOwner() }$\n"
-  FileWrite $1 "(New-Object System.Security.Principal.NTAccount($u.Domain, $u.User)).Translate([System.Security.Principal.SecurityIdentifier]).Value$\n"
+  FileWrite $1 "$$o = Get-CimInstance Win32_Process | Where-Object Name -eq 'explorer.exe' | Select-Object -First 1$\r$\n"
+  FileWrite $1 "$$u = $$o | ForEach-Object { $$_.GetOwner() }$\r$\n"
+  FileWrite $1 "(New-Object System.Security.Principal.NTAccount($$u.Domain, $$u.User)).Translate([System.Security.Principal.SecurityIdentifier]).Value$\r$\n"
   FileClose $1
   nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\resolve-sid.ps1"'
   Pop $2 ; exit code
