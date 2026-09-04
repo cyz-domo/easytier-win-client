@@ -69,7 +69,14 @@ fn service_query() -> ServiceInstallation {
 fn query_service_installation() -> ServiceInstallation { service_query() }
 
 #[tauri::command]
-fn detect_runtime(runtime_dir: Option<String>) -> RuntimeInfo { let (core, cli) = paths(runtime_dir); let version = Command::new(&core).arg("--version").output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_else(|| "unknown".into()).trim().to_string(); RuntimeInfo { core_path: core.display().to_string(), cli_path: cli.display().to_string(), version, available: core.exists() && cli.exists() } }
+fn detect_runtime(runtime_dir: Option<String>) -> RuntimeInfo {
+    let (core, cli) = paths(runtime_dir);
+    let mut command = Command::new(&core);
+    command.arg("--version").stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(windows)] command.creation_flags(0x08000000);
+    let version = command.output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_else(|| "unknown".into()).trim().to_string();
+    RuntimeInfo { core_path: core.display().to_string(), cli_path: cli.display().to_string(), version, available: core.exists() && cli.exists() }
+}
 #[tauri::command]
 fn get_instance_state(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> InstanceState {
     let mut p = state.lock().unwrap();
@@ -176,7 +183,10 @@ fn is_port_in_use(port: u16) -> bool { std::net::TcpListener::bind(("0.0.0.0", p
 #[tauri::command]
 fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<String, String> {
     let (_, cli) = paths(runtime_dir);
-    let mut child = Command::new(cli).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    let mut child = Command::new(cli);
+    child.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)] child.creation_flags(0x08000000);
+    let mut child = child.spawn().map_err(|e| e.to_string())?;
     // The CLI retries internally when the RPC portal is unreachable and can
     // hang for a long time; cap each query so dead cores cannot pile up
     // cli processes.
