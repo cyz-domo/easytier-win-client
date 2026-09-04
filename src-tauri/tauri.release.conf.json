@@ -2,7 +2,9 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "resources": {
       "core-stage/*": "core/",
       "service-stage/easytier-service.exe": "easytier-service.exe"
@@ -12,6 +14,7 @@
         "installMode": "perMachine",
         "installerHooks": "./windows/installer-hooks.nsh"
       }
-    }
+    },
+    "useLocalToolsDir": true
   }
 }
