@@ -1,11 +1,12 @@
 ; NSIS installer hooks for the EasyTierService lifecycle.
-; The installer runs elevated (perMachine); POSTINSTALL registers and starts
-; the background service, resolving the ORIGINAL interactive user's SID from
-; the explorer process so named-pipe ACLs match the user who launched setup
-; (not the elevated admin token). PREUNINSTALL stops owned cores, waits for
-; the service to exit, then deletes it before files are removed. Failures
-; surface as warnings instead of blocking uninstall, so a stuck service can
-; be retried from app settings without leaving a half-deleted install.
+; The installer runs elevated (perMachine). POSTINSTALL resolves the ORIGINAL
+; interactive user's SID (the elevated admin token would give the wrong SID),
+; registers EasyTierService with it for named-pipe ACL validation, and starts
+; it. SID resolution uses a temp PowerShell script file - inline -Command
+; quoting inside NSIS is fragile and was the cause of silent registration
+; failures. PREUNINSTALL stops owned cores, waits for the service to exit,
+; then deletes it. Failures surface as warnings so uninstall can be retried
+; from app settings without leaving a half-deleted install.
 
 !macro _EasyTierStopService
   DetailPrint "Stopping EasyTier Service..."
@@ -27,22 +28,60 @@
   service_stopped:
 !macroend
 
-; Resolve the original interactive user's SID via the explorer process token.
+; Resolve the original interactive user's SID via the explorer process owner.
 ; Writes the SID into $R8; empty string on failure (service then fails closed
 ; on IPC startup, which is safer than a permissive ACL).
 !macro _EasyTierResolveUserSid
   StrCpy $R8 ""
-  nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -Command "(Get-CimInstance Win32_Process -Filter \"Name=''explorer.exe''\" | Select-Object -First 1 | ForEach-Object { $_.GetOwner() } | ForEach-Object { (New-Object System.Security.Principal.NTAccount($_.Domain, $_.User)).Translate([System.Security.Principal.SecurityIdentifier]).Value })"'
-  Pop $1 ; exit code
-  Pop $2 ; stdout
-  ${If} $1 = 0
-    ${If} $2 == "S-1-5-18"
+  ; Dump the resolver to a temp .ps1: avoids NSIS quote-escaping pitfalls.
+  FileOpen $1 "$PLUGINSDIR\resolve-sid.ps1" w
+  FileWrite $1 "$o = Get-CimInstance Win32_Process -Filter `"Name='explorer.exe'`" | Select-Object -First 1$\n"
+  FileWrite $1 "$u = $o | ForEach-Object { $_.GetOwner() }$\n"
+  FileWrite $1 "(New-Object System.Security.Principal.NTAccount($u.Domain, $u.User)).Translate([System.Security.Principal.SecurityIdentifier]).Value$\n"
+  FileClose $1
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\resolve-sid.ps1"'
+  Pop $2 ; exit code
+  Pop $3 ; stdout (SID)
+  ${If} $2 = 0
+    ; Trim whitespace/CR that PowerShell may append.
+    Push $3
+    Call trim_sid
+    Pop $R8
+    ${If} $R8 == "S-1-5-18"
       StrCpy $R8 ""
-    ${Else}
-      StrCpy $R8 $2
     ${EndIf}
   ${EndIf}
 !macroend
+
+; Strip CR/LF/spaces from a stack string in place.
+!macro _EasyTierTrim input output
+  Push `${input}`
+  Call trim_sid
+  Pop `${output}`
+!macroend
+
+Function trim_sid
+  Exch $R0
+  Push $R1
+  trim_loop:
+    StrCpy $R1 "$R0" 1
+    ${If} $R1 == " "
+    ${OrIf} $R1 == "$\r"
+    ${OrIf} $R1 == "$\n"
+      StrCpy $R0 "$R0" "" 1
+      Goto trim_loop
+    ${EndIf}
+  trim_tail:
+    StrCpy $R1 "$R0" 1 -1
+    ${If} $R1 == " "
+    ${OrIf} $R1 == "$\r"
+    ${OrIf} $R1 == "$\n"
+      StrCpy $R0 "$R0" -1
+      Goto trim_tail
+    ${EndIf}
+  Pop $R1
+  Exch $R0
+FunctionEnd
 
 !macro NSIS_HOOK_POSTINSTALL
   !insertmacro _EasyTierResolveUserSid

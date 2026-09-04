@@ -668,9 +668,9 @@ export default function App() {
               <div className="card-title-row"><h3 className="card-title">后台服务</h3><span className={serviceMode ? 'service-state online' : 'service-state'}>{serviceMode ? '服务模式' : '兼容模式'}</span></div>
               <p className="hint">{service?.message || (service?.installed ? (service?.running ? '服务正在运行。' : '服务已安装但尚未运行。') : '未检测到 EasyTierService。')}</p>
               <div className="service-actions">
-                {!service?.installed && <button className="primary" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await serviceRequest('install_service'); await refreshService(); } catch (e) { alert(`安装服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>安装后台服务</button>}
-                {service?.installed && !service?.running && <button className="primary" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await serviceRequest('start_service'); await refreshService(); } catch (e) { alert(`启动服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>启动服务</button>}
-                {service?.installed && <button className="ghost" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await serviceRequest('repair_service'); await refreshService(); } catch (e) { alert(`修复服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>修复服务</button>}
+                {!service?.installed && <button className="primary" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await invoke('install_service'); await refreshService(); } catch (e) { alert(`安装服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>安装后台服务</button>}
+                {service?.installed && !service?.running && <button className="primary" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await invoke('start_service'); await refreshService(); } catch (e) { alert(`启动服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>启动服务</button>}
+                {service?.installed && <button className="ghost" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await invoke('repair_service'); await refreshService(); } catch (e) { alert(`修复服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>修复服务</button>}
               </div>
             </div>
             <div className="card">
