@@ -777,17 +777,23 @@ pub fn run() {
                             }
                         }
                         // Service mode: ask the service to stop all instances.
+                        // Reuse service_request so we read the response before
+                        // exiting; fire-and-forget writes race with app.exit.
                         #[cfg(windows)]
-                        if let Ok(pipe) = PipeClient::connect(r"\\.\pipe\EasyTierService") {
+                        {
                             let request = serde_json::json!({
                                 "protocol_version": ipc::PROTOCOL_VERSION,
                                 "request_id": uuid::Uuid::new_v4().to_string(),
                                 "command": "stop_all_instances",
                                 "payload": {},
                             });
-                            let mut writer = pipe;
-                            let _ = writer.write_all(serde_json::to_vec(&request).unwrap_or_default().as_slice())
-                                .and_then(|_| writer.write_all(b"\n"));
+                            if let Ok(bytes) = serde_json::to_vec(&request) {
+                                if let Ok(mut pipe) = PipeClient::connect(r"\\.\pipe\EasyTierService") {
+                                    use std::io::{BufRead as _, Write as _};
+                                    let _ = pipe.write_all(&bytes).and_then(|_| pipe.write_all(b"\n"));
+                                    let _ = BufReader::new(pipe).read_until(b'\n', &mut Vec::new());
+                                }
+                            }
                         }
                         app.exit(0);
                     }

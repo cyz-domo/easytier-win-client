@@ -99,6 +99,20 @@ export function formatBytes(n: number | string | undefined): string {
   return `${(v / 1024 ** 3).toFixed(2)} GB`;
 }
 
+const BYTE_UNITS: Record<string, number> = { b: 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 };
+
+/** Parse CLI human-formatted byte strings ("1.83 kB", "2.6 MB") to bytes. */
+export function parseHumanBytes(v: number | string | undefined | null): number {
+  if (v == null) return 0;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  const m = v.trim().match(/^([\d.]+)\s*([KMGT])?B?$/i);
+  if (!m) return 0;
+  const value = parseFloat(m[1]);
+  if (Number.isNaN(value)) return 0;
+  const unit = BYTE_UNITS[(m[2] ?? 'b').toLowerCase()] ?? 1;
+  return Math.round(value * unit);
+}
+
 export type StatusTone = 'connected' | 'connecting' | 'error' | 'local' | 'muted';
 
 export function routeTone(cost: string | number | undefined): StatusTone {

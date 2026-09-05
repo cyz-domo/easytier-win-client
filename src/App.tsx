@@ -4,7 +4,7 @@ import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { defaultConfig, listenersForInstance, NetworkConfig, validateConfig } from './network-config';
 import { decodeTOML, encodeTOML } from './toml-codec';
 import { ConfigEditor } from './ConfigEditor';
-import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, latencyTone, parseNodeJSON, parsePeerJSON, parseRouteJSON, routeTone } from './status-data';
+import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, latencyTone, parseHumanBytes, parseNodeJSON, parsePeerJSON, parseRouteJSON, routeTone } from './status-data';
 import { RemoteConfigDialog, RemoteConfigEditor } from './RemoteConfigDialog';
 
 function RemoteConfigPanel({ host, running, peers, onPickPeer }: {
@@ -165,8 +165,15 @@ export default function App() {
         return;
       }
       if (!installed.running) {
-        setService({ installed: true, running: false, message: '服务已安装但尚未运行。' });
-        return;
+        // Auto-start an installed-but-stopped service so the user does not
+        // have to visit settings after a reboot or manual service stop.
+        try {
+          await invoke('start_service');
+          await new Promise(r => setTimeout(r, 800));
+        } catch {
+          setService({ installed: true, running: false, message: '服务已安装但尚未运行。' });
+          return;
+        }
       }
       const next = await getServiceStatus();
       setService({ ...next, installed: true, running: true });
@@ -174,7 +181,7 @@ export default function App() {
         const states = await serviceRequest<ServiceInstanceState[]>('list_instances');
         setInstances(xs => xs.map(i => {
           const s = states.find(x => x.id === i.id);
-          return s ? { ...i, name: s.name || i.name, rpcPort: s.rpc_port ?? i.rpcPort, status: s.observed_state, autoStart: s.auto_start, desiredState: s.desired_state, lastError: s.last_error } : i;
+          return s ? { ...i, name: s.name || i.name, rpcPort: s.rpc_port ?? i.rpcPort, status: s.observed_state, autoStart: s.auto_start, desiredState: s.desired_state, lastError: s.last_error, remoteManageEnabled: s.remote_manage_enabled ?? i.remoteManageEnabled, rpcWhitelistCidrs: s.rpc_whitelist_cidrs ?? i.rpcWhitelistCidrs } : i;
         }));
       }
     } catch (e) {
@@ -389,6 +396,8 @@ export default function App() {
           instance_id: current.id, name: current.name, config_toml: encodeTOML(current.config),
           rpc_port: current.rpcPort, auto_start: current.autoStart ?? false,
           desired_state: running ? 'stopped' : 'running',
+          remote_manage_enabled: current.remoteManageEnabled ?? false,
+          rpc_whitelist_cidrs: current.rpcWhitelistCidrs ?? [],
         });
         await serviceRequest(running ? 'stop_instance' : 'start_instance', { instance_id: current.id });
         await refreshService();
@@ -521,7 +530,7 @@ export default function App() {
     if (kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)) return;
     if (!kernelInfo?.update_available) return;
     if (!confirm(`将更新 EasyTier 内核至 v${kernelInfo.latest_version}，更新期间会停止并自动重启当前运行中的网络。继续吗？`)) return;
-    const runningInstances = instances.filter(i => i.status === 'running').map(i => ({ id: i.id, config: encodeTOML(i.config), rpc_port: i.rpcPort }));
+    const runningInstances = instances.filter(i => i.status === 'running').map(i => ({ id: i.id, config: encodeTOML(i.config), rpc_port: i.rpcPort, remote_manage_enabled: i.remoteManageEnabled ?? false, rpc_whitelist_cidrs: i.rpcWhitelistCidrs ?? [] }));
     setKernelUpdate({ phase: 'checking', downloaded_bytes: 0, total_bytes: null, percent: 0, message: '正在准备更新' });
     try {
       let serviceTaskTerminal = false;
@@ -612,7 +621,7 @@ export default function App() {
               <div>
                 <span className="card-label">当前状态</span>
                 <h2>{statusText}</h2>
-                <p>{running ? `RPC 管理端口 127.0.0.1:${current.rpcPort}${node?.version ? ` · 核心 ${node.version}` : ''}` : '启动网络后，设备将加入 EasyTier 虚拟网络。'}</p>
+                <p>{running ? `RPC 管理端口 ${current.remoteManageEnabled ? `0.0.0.0（已允许远程管理）:${current.rpcPort}` : `127.0.0.1:${current.rpcPort}`}${node?.version ? ` · 核心 ${node.version}` : ''}` : '启动网络后，设备将加入 EasyTier 虚拟网络。'}</p>
                 {running && !node?.ipv4_addr && (
                   <p className="warn-inline">⚠ 本机尚未获得虚拟 IPv4 —— 请在「组网配置 → 基础配置」勾选 DHCP 或手动填写虚拟 IPv4，然后重启网络（TUN 需要管理员权限运行客户端）。</p>
                 )}
@@ -622,7 +631,7 @@ export default function App() {
             <div className="metrics">
               <article><span>组网成员</span><strong>{running ? peers.length : '—'}</strong><small>{running ? '在线节点' : '未运行'}</small></article>
               <article><span>路由条目</span><strong>{running ? routes.length : '—'}</strong><small>{running ? '已知网段' : '未运行'}</small></article>
-              <article><span>收发总量</span><strong>{running ? formatBytes(peers.reduce((s, p) => s + (Number(p.rx_bytes) || 0) + (Number(p.tx_bytes) || 0), 0)) : '—'}</strong><small>所有成员合计</small></article>
+              <article><span>收发总量</span><strong>{running ? formatBytes(peers.reduce((s, p) => s + parseHumanBytes(p.rx_bytes) + parseHumanBytes(p.tx_bytes), 0)) : '—'}</strong><small>所有成员合计</small></article>
             </div>
             <div className="section-heading"><div><h2>快速操作</h2><p>常用配置与信息入口</p></div></div>
             <div className="config-grid">

@@ -48,6 +48,8 @@ export interface ServiceInstanceState {
   desired_state: 'stopped' | 'running';
   observed_state: 'stopped' | 'starting' | 'running' | 'stopping' | 'failed';
   last_error?: string | null;
+  remote_manage_enabled?: boolean;
+  rpc_whitelist_cidrs?: string[];
 }
 
 export async function serviceRequest<TData = unknown, TPayload = Record<string, unknown>>(

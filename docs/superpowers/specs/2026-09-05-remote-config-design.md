@@ -170,3 +170,22 @@ use easytier::tunnel::tcp::TcpTunnelConnector;
 2. Tauri 命令接线 + `RemoteConfigDialog`/`RemoteConfigFields` 前端闭环（本机双实例跑通 discover/load/patch）；
 3. 本实例远程管理开关 + 白名单 + `build_rpc_portal_args` 统一三处启动点 + 设置页；
 4. 真机联调 + README / docs 更新，合回 `main`。
+
+## 10. 验证反馈与内存备忘（2026-09-06）
+
+第一轮真机验证反馈的修复：
+
+1. 远程管理开关开启后 RPC 仍绑 127.0.0.1：根因是服务模式 `sync_instance` 未透传 `remote_manage_enabled`/`rpc_whitelist_cidrs`（已修，前端 sync/list/内核更新恢复三条路径均补齐），且旧的 core 进程必须重启网络才应用新参数。
+2. GUI 启动时自动拉起"已安装但未运行"的服务。
+3. 托盘退出的 `stop_all_instances` 改为读响应后再退出（fire-and-forget 与 app.exit 竞争）。
+4. 首页收发总量一直为 0：CLI 返回 "1.83 kB" 这类人类可读字符串，`Number()` 解析为 NaN。新增 `parseHumanBytes` 解析。
+5. 状态页 RPC 端口显示跟随实际绑定（0.0.0.0 时标注"已允许远程管理"）。
+
+内存占用备忘（GUI ~180MB / service ~38MB）：
+
+- GUI 大头是 WebView2 + Tauri + easytier crate 静态链接进主进程。后续可考虑：
+  - easytier RPC 依赖只在 feature gate 后编译（`#[cfg(feature = "remote-rpc")]`），不需要时零开销；
+  - release profile 已是 opt，可加 `strip = true`、`lto = "thin"`、`codegen-units = 1` 减小二进制与常驻内存；
+  - 前端侧 instances/peers 状态量小，不是瓶颈。
+- service 38MB 主要为 tokio runtime + easytier 静态链接（service binary 也链接了 remote_rpc）。同样可用 feature gate 将 easytier 依赖从 service binary 剥离（service 不需要远程 RPC 客户端，只需要 core 管理）。
+- 属于优化项，不在远程配置功能范围内强行做。
