@@ -97,6 +97,7 @@ export default function App() {
     load('easytier.peer-cols.v1', PEER_COLUMNS.filter(c => c.defaultOn).map(c => c.key)));
   const [refreshSecs, setRefreshSecs] = useState<RefreshInterval>(() => load('easytier.refresh.v1', 3));
   const [showDisplaySettings, setShowDisplaySettings] = useState(false);
+  const [showPeerNodes, setShowPeerNodes] = useState<boolean>(() => load('easytier.show-peer-nodes.v1', false));
   const [tomlDraft, setTomlDraft] = useState<string | null>(null);
   const [tomlDirty, setTomlDirty] = useState(false);
   const [tomlError, setTomlError] = useState<string | null>(null);
@@ -112,6 +113,24 @@ export default function App() {
   const kernelTaskId = kernelUpdate?.task_id ?? null;
 
   const current = useMemo(() => instances.find(i => i.id === activeId) ?? instances[0], [instances, activeId]);
+  const visiblePeers = useMemo(() => {
+    if (showPeerNodes || !current) return peers;
+    const peerTargets = new Set<string>();
+    for (const raw of current.config.peer_urls) {
+      try {
+        const url = new URL(raw);
+        if (url.hostname) peerTargets.add(url.hostname.toLowerCase());
+        if (url.port) peerTargets.add(`${url.hostname.toLowerCase()}:${url.port}`);
+      } catch {
+        const match = raw.match(/^(?:\w+:\/\/)?([^/:]+)(?::(\d+))?/);
+        if (match) { peerTargets.add(match[1].toLowerCase()); if (match[2]) peerTargets.add(`${match[1].toLowerCase()}:${match[2]}`); }
+      }
+    }
+    return peers.filter(peer => {
+      const candidates = [peer.uri, peer.hostname, peer.ipv4, peer.id].filter(Boolean).map(value => String(value).toLowerCase());
+      return !candidates.some(value => peerTargets.has(value) || [...peerTargets].some(target => value.includes(target)));
+    });
+  }, [current, peers, showPeerNodes]);
 
   useEffect(() => { localStorage.setItem('easytier.instances.v2', JSON.stringify(instances)); }, [instances]);
   useEffect(() => { if (current) localStorage.setItem('easytier.active.v2', current.id); }, [current]);
@@ -174,6 +193,7 @@ export default function App() {
   }, [current?.id, current?.status, serviceMode, refreshSecs]);
 
   useEffect(() => { localStorage.setItem('easytier.refresh.v1', JSON.stringify(refreshSecs)); }, [refreshSecs]);
+  useEffect(() => { localStorage.setItem('easytier.show-peer-nodes.v1', JSON.stringify(showPeerNodes)); }, [showPeerNodes]);
   useEffect(() => { localStorage.setItem('easytier.kernel-update-proxy.v1', JSON.stringify(kernelProxy)); }, [kernelProxy]);
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
@@ -573,7 +593,7 @@ export default function App() {
         {tab === 'peers' && (
           <div className="card">
             <div className="card-title-row">
-              <h3 className="card-title">组网成员{running ? `（${peers.length}）` : ''}</h3>
+              <h3 className="card-title">组网成员{running ? `（${visiblePeers.length}${showPeerNodes ? '' : `，已隐藏 ${peers.length - visiblePeers.length} 个 Peer`}）` : ''}</h3>
               <div className="title-actions">
                 <span className="hint-inline">刷新 {refreshSecs}s</span>
                 <button className="ghost" onClick={() => setShowDisplaySettings(x => !x)}>显示设置</button>
@@ -584,6 +604,10 @@ export default function App() {
                 <div className="display-cols">
                   <span className="field-label">数据项</span>
                   <div className="display-col-list">
+                    <label className="check-item">
+                      <input type="checkbox" checked={showPeerNodes} onChange={e => setShowPeerNodes(e.target.checked)} />
+                      显示 Peer 节点
+                    </label>
                     {PEER_COLUMNS.map(c => (
                       <label key={c.key} className="check-item">
                         <input type="checkbox" checked={visibleCols.includes(c.key)}
@@ -628,7 +652,7 @@ export default function App() {
                   {visibleCols.includes('routes') && <th>子网路由</th>}
                 </tr></thead>
                 <tbody>
-                  {peers.map((p, i) => {
+                  {visiblePeers.map((p, i) => {
                     const route = routes.find(r => r.hostname === p.hostname);
                     const isLocal = p.cost === 'Local';
                     const nodeType = isLocal ? '本机' : (route && (route.path_len ?? 0) > 1 ? '服务节点' : '普通节点');
@@ -651,7 +675,7 @@ export default function App() {
                       </tr>
                     );
                   })}
-                  {peers.length === 0 && <tr><td colSpan={14} className="list-empty">暂无在线成员</td></tr>}
+                  {visiblePeers.length === 0 && <tr><td colSpan={14} className="list-empty">暂无可显示成员</td></tr>}
                 </tbody>
               </table>
               </div>
