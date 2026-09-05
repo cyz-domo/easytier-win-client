@@ -21,6 +21,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use easytier::proto::rpc_types::controller::Controller;
 use easytier::proto::{
     api::{
         config::{ConfigRpc, ConfigRpcClientFactory, GetConfigRequest, PatchConfigRequest},
@@ -167,6 +168,7 @@ async fn acquire_rpc_permit(semaphore: Arc<tokio::sync::Semaphore>, label: &str)
 
 async fn call_with_endpoint<T>(
     endpoint: &RpcEndpoint,
+    endpoint_key: &str,
     label: &str,
     f: impl FnOnce(&mut StandAloneClient<TcpTunnelConnector>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send + '_>>,
 ) -> Result<T, RpcError> {
@@ -185,12 +187,31 @@ async fn call_with_endpoint<T>(
     let mut guard = endpoint.client.lock().await;
     match tokio::time::timeout(CALL_TIMEOUT, f(&mut guard)).await {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(RpcError::Unavailable(format!("Remote EasyTier RPC failed: {e}"))),
+        // A dead tunnel is not always reported by take_error(); drop the whole
+        // cached endpoint so the next call rebuilds a fresh TCP + RPC session
+        // instead of retrying on a stale connection forever.
+        Ok(Err(e)) => {
+            if let Ok(mut clients) = RPC_CLIENTS.lock() {
+                clients.remove(endpoint_key);
+            }
+            Err(RpcError::Unavailable(format!("Remote EasyTier RPC failed: {e}")))
+        }
         Err(_) => {
+            if let Ok(mut clients) = RPC_CLIENTS.lock() {
+                clients.remove(endpoint_key);
+            }
             let message = format!("EasyTier RPC {label} timed out after {} seconds.", CALL_TIMEOUT.as_secs());
             Err(RpcError::Timeout(message))
         }
     }
+}
+
+/// RPC calls use the controller default of 5s; slow links over the VPN need
+/// more headroom, so build a controller with a longer deadline.
+fn rpc_controller() -> BaseController {
+    let mut ctrl = BaseController::default();
+    ctrl.set_timeout_ms(CALL_TIMEOUT.as_millis() as i32);
+    ctrl
 }
 
 fn set_connect_cooldown(endpoint: &RpcEndpoint, message: String) {
@@ -228,7 +249,7 @@ pub async fn discover_remote_instance(host: &str, port: u16, virtual_ip: &str) -
         .trim()
         .to_string();
 
-    let result = call_with_endpoint(&endpoint, "discover", |client| {
+    let result = call_with_endpoint(&endpoint, &format!("rpc-{host}-{port}"), "discover", |client| {
         let ip = ip.clone();
         Box::pin(async move {
             let peers = tokio::time::timeout(CALL_TIMEOUT, async {
@@ -236,7 +257,7 @@ pub async fn discover_remote_instance(host: &str, port: u16, virtual_ip: &str) -
                     .scoped_client::<PeerManageRpcClientFactory<BaseController>>("".to_string())
                     .await
                     .map_err(|e| format!("connect failed: {e:#}"))?
-                    .list_peer(BaseController::default(), ListPeerRequest { instance: None })
+                    .list_peer(rpc_controller(), ListPeerRequest { instance: None })
                     .await
                     .map_err(|e| format!("list_peer failed: {e:#}"))
             })
@@ -248,7 +269,7 @@ pub async fn discover_remote_instance(host: &str, port: u16, virtual_ip: &str) -
                     .scoped_client::<PeerManageRpcClientFactory<BaseController>>("".to_string())
                     .await
                     .map_err(|e| format!("connect failed: {e:#}"))?
-                    .list_route(BaseController::default(), ListRouteRequest { instance: None })
+                    .list_route(rpc_controller(), ListRouteRequest { instance: None })
                     .await
                     .map_err(|e| format!("list_route failed: {e:#}"))
             })
@@ -292,7 +313,7 @@ pub async fn discover_remote_instance(host: &str, port: u16, virtual_ip: &str) -
 pub async fn load_remote_config(host: &str, port: u16, instance_id: &str) -> Result<Value, String> {
     let endpoint = endpoint_for(host, port).map_err(|e| e.to_string())?;
     let ident = instance_identifier(instance_id).map_err(|e| e.to_string())?;
-    let result = call_with_endpoint(&endpoint, "get_config", |client| {
+    let result = call_with_endpoint(&endpoint, &format!("rpc-{host}-{port}"), "get_config", |client| {
         let ident = ident.clone();
         Box::pin(async move {
             let stub = client
@@ -300,7 +321,7 @@ pub async fn load_remote_config(host: &str, port: u16, instance_id: &str) -> Res
                 .await
                 .map_err(|e| format!("connect failed: {e:#}"))?;
             let response = stub
-                .get_config(BaseController::default(), GetConfigRequest { instance: Some(ident) })
+                .get_config(rpc_controller(), GetConfigRequest { instance: Some(ident) })
                 .await
                 .map_err(|e| format!("get_config failed: {e:#}"))?;
             serde_json::to_value(response).map_err(|e| format!("failed to encode config: {e}"))
@@ -355,7 +376,7 @@ pub async fn patch_remote_config(host: &str, port: u16, instance_id: &str, patch
     // here instead of silently reaching the remote node.
     let patch_typed: easytier::proto::api::config::InstanceConfigPatch =
         serde_json::from_value(patch_value).map_err(|e| format!("invalid patch payload: {e}"))?;
-    let result = call_with_endpoint(&endpoint, "patch_config", |client| {
+    let result = call_with_endpoint(&endpoint, &format!("rpc-{host}-{port}"), "patch_config", |client| {
         let ident = ident.clone();
         let patch_typed = patch_typed.clone();
         Box::pin(async move {
@@ -365,7 +386,7 @@ pub async fn patch_remote_config(host: &str, port: u16, instance_id: &str, patch
                 .map_err(|e| format!("connect failed: {e:#}"))?;
             let response = stub
                 .patch_config(
-                    BaseController::default(),
+                                        rpc_controller(),
                     PatchConfigRequest { patch: Some(patch_typed), instance: Some(ident) },
                 )
                 .await

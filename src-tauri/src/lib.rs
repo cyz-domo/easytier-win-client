@@ -659,6 +659,7 @@ fn install_service() -> Result<String, String> {
             .ok_or_else(|| "service_path_invalid: executable has no parent".to_string())?;
         let candidates = [
             dir.join("easytier-service.exe"),
+            dir.join("service/easytier-service.exe"),
             dir.join("resources/easytier-service.exe"),
         ];
         let service = candidates
