@@ -129,7 +129,7 @@ export default function App() {
         const states = await serviceRequest<ServiceInstanceState[]>('list_instances');
         setInstances(xs => xs.map(i => {
           const s = states.find(x => x.id === i.id);
-          return s ? { ...i, name: s.name || i.name, status: s.observed_state, autoStart: s.auto_start, desiredState: s.desired_state, lastError: s.last_error } : i;
+          return s ? { ...i, name: s.name || i.name, rpcPort: s.rpc_port ?? i.rpcPort, status: s.observed_state, autoStart: s.auto_start, desiredState: s.desired_state, lastError: s.last_error } : i;
         }));
       }
     } catch (e) {

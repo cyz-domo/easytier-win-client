@@ -26,27 +26,42 @@ mod windows_service {
 
     pub fn run() -> Result<(), String> { service_dispatcher::start("EasyTierService", ffi_service_main).map_err(|e| e.to_string()) }
     fn service_main(args: Vec<std::ffi::OsString>) {
-        if let Err(error) = run_service(args) {
-            let _ = std::fs::create_dir_all(config_store::data_dir());
-            let _ = std::fs::write(config_store::data_dir().join("service-startup.log"), format!("{error}\n"));
-        }
-    }
-
-    fn run_service(args: Vec<std::ffi::OsString>) -> Result<(), String> {
-        let interactive_sid = args.iter()
-            .filter_map(|arg| arg.to_str())
-            .find_map(|arg| arg.strip_prefix("--interactive-user-sid="))
-            .filter(|sid| !sid.trim().is_empty())
-            .ok_or_else(|| "missing trusted interactive user SID; refusing to start IPC".to_string())?
-            .to_string();
         let stopped = Arc::new(Mutex::new(false));
         let stop_flag = stopped.clone();
-        let status_handle = service_control_handler::register("EasyTierService", move |event| {
+        let status_handle = match service_control_handler::register("EasyTierService", move |event| {
             match event {
                 ServiceControl::Stop | ServiceControl::Shutdown => { *stop_flag.lock().unwrap() = true; ServiceControlHandlerResult::NoError }
                 _ => ServiceControlHandlerResult::NotImplemented,
             }
-        }).map_err(|e| e.to_string())?;
+        }) {
+            Ok(handle) => handle,
+            Err(error) => { write_startup_error(&format!("service control handler registration failed: {error}")); return; }
+        };
+        let result = run_service(args, stopped, &status_handle);
+        if let Err(error) = result {
+            write_startup_error(&error);
+            let _ = status_handle.set_service_status(ServiceStatus { service_type: ServiceType::OWN_PROCESS, current_state: ServiceState::Stopped, controls_accepted: ServiceControlAccept::empty(), exit_code: ServiceExitCode::Win32(1), checkpoint: 0, wait_hint: std::time::Duration::default(), process_id: None });
+        }
+    }
+
+    fn write_startup_error(error: &str) {
+        let _ = std::fs::create_dir_all(config_store::data_dir());
+        let _ = std::fs::write(config_store::data_dir().join("service-startup.log"), format!("{error}\n"));
+    }
+
+    fn run_service(args: Vec<std::ffi::OsString>, stopped: Arc<Mutex<bool>>, status_handle: &::windows_service::service_control_handler::ServiceStatusHandle) -> Result<(), String> {
+        let interactive_sid = args.iter()
+            .filter_map(|arg| arg.to_str())
+            .find_map(|arg| arg.strip_prefix("--interactive-user-sid="))
+            .filter(|sid| !sid.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| std::env::current_exe().ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join("interactive-user.sid")))
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .map(|sid| sid.trim().to_string())
+                .filter(|sid| !sid.is_empty()))
+            .or_else(|| std::fs::read_to_string(config_store::data_dir().join("interactive-user.sid")).ok().map(|sid| sid.trim().to_string()).filter(|sid| !sid.is_empty()))
+            .ok_or_else(|| "missing trusted interactive user SID; refusing to start IPC".to_string())?;
         status_handle.set_service_status(ServiceStatus { service_type: ServiceType::OWN_PROCESS, current_state: ServiceState::Running, controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN, exit_code: ServiceExitCode::Win32(0), checkpoint: 0, wait_hint: std::time::Duration::default(), process_id: None }).map_err(|e| e.to_string())?;
         let state_path = config_store::state_path();
         let state = Arc::new(Mutex::new(config_store::load(&state_path)?));
@@ -68,7 +83,13 @@ mod windows_service {
         status_handle.set_service_status(ServiceStatus { service_type: ServiceType::OWN_PROCESS, current_state: ServiceState::Stopped, controls_accepted: ServiceControlAccept::empty(), exit_code: ServiceExitCode::Win32(0), checkpoint: 0, wait_hint: std::time::Duration::default(), process_id: None }).map_err(|e| e.to_string())
     }
 
-    fn service_core_path() -> std::path::PathBuf { std::env::current_exe().ok().and_then(|p| p.parent().map(|x| x.join("core").join("easytier-core.exe"))).unwrap_or_else(|| std::path::PathBuf::from("core/easytier-core.exe")) }
+    fn service_core_path() -> std::path::PathBuf {
+        let fallback = std::path::PathBuf::from("core/easytier-core.exe");
+        let Some(exe) = std::env::current_exe().ok() else { return fallback; };
+        let Some(dir) = exe.parent() else { return fallback; };
+        [dir.join("core/easytier-core.exe"), dir.join("resources/core/easytier-core.exe"), dir.parent().map(|p| p.join("core/easytier-core.exe")).unwrap_or_default()]
+            .into_iter().find(|path| path.exists()).unwrap_or_else(|| dir.join("core/easytier-core.exe"))
+    }
 
     fn handle(req: ipc::Request, state: &Arc<Mutex<config_store::ServiceState>>, runtime: &Arc<Mutex<runtime_manager::RuntimeManager>>, path: &std::path::Path, cache: &ipc::IdempotencyCache, tasks: &Tasks, update_lock: &Arc<Mutex<bool>>) -> ipc::Response {
         if req.protocol_version != ipc::PROTOCOL_VERSION { return ipc::error(&req, "invalid_request", "unsupported protocol version"); }
@@ -89,10 +110,37 @@ mod windows_service {
         match req.command.as_str() {
             "service_status" => Ok(serde_json::json!({"running": true, "protocol_version": ipc::PROTOCOL_VERSION})),
             "list_instances" => { let mut r = runtime.lock().unwrap(); Ok(serde_json::to_value(s.instances.iter().map(|x| r.snapshot(x)).collect::<Vec<_>>()).unwrap()) },
-            "sync_instance" => { let c: config_store::InstanceConfig = serde_json::from_value(req.payload.clone()).map_err(|e| ("invalid_request", e.to_string()))?; if let Some(old) = s.instances.iter_mut().find(|x| x.id == c.id) { *old = c.clone(); } else { s.instances.push(c.clone()); } Ok(serde_json::to_value(c).unwrap()) },
+            "sync_instance" => {
+                let mut payload = req.payload.clone();
+                if let Some(object) = payload.as_object_mut() {
+                    if let Some(instance_id) = object.remove("instance_id") {
+                        if let Some(existing) = object.get("id") {
+                            if existing != &instance_id { return Err(("invalid_request", "id and instance_id do not match".into())); }
+                        } else {
+                            object.insert("id".into(), instance_id);
+                        }
+                    }
+                }
+                let c: config_store::InstanceConfig = serde_json::from_value(payload).map_err(|e| ("invalid_request", e.to_string()))?;
+                if let Some(old) = s.instances.iter_mut().find(|x| x.id == c.id) { *old = c.clone(); } else { s.instances.push(c.clone()); }
+                Ok(serde_json::to_value(c).unwrap())
+            },
             "remove_instance" => { let id = req.payload.get("instance_id").and_then(|v| v.as_str()).ok_or(("invalid_request", "missing instance_id".into()))?; if let Some(pos) = s.instances.iter().position(|x| x.id == id) { if runtime.lock().unwrap().children.contains_key(id) { return Err(("busy", "instance is running".into())); } s.instances.remove(pos); Ok(serde_json::json!({"removed": true})) } else { Err(("instance_not_found", "instance not found".into())) } },
             "start_instance" | "stop_instance" => { let id = req.payload.get("instance_id").and_then(|v| v.as_str()).ok_or(("invalid_request", "missing instance_id".into()))?; let c = s.instances.iter_mut().find(|x| x.id == id).ok_or(("instance_not_found", "instance not found".into()))?; if req.command == "start_instance" { c.desired_state = DesiredState::Running; runtime.lock().unwrap().start(c).map_err(|e| ("core_not_found", e))?; } else { c.desired_state = DesiredState::Stopped; runtime.lock().unwrap().stop(c).map_err(|e| ("operation_timeout", e))?; } Ok(serde_json::to_value(runtime.lock().unwrap().snapshot(c)).unwrap()) },
             "set_auto_start" => { let id = req.payload.get("instance_id").and_then(|v| v.as_str()).ok_or(("invalid_request", "missing instance_id".into()))?; let enabled = req.payload.get("auto_start").and_then(|v| v.as_bool()).ok_or(("invalid_request", "missing auto_start".into()))?; let c = s.instances.iter_mut().find(|x| x.id == id).ok_or(("instance_not_found", "instance not found".into()))?; c.auto_start = enabled; Ok(serde_json::json!({"auto_start": enabled})) },
+            "run_cli" => {
+                let args: Vec<String> = serde_json::from_value(req.payload.get("args").cloned().ok_or(("invalid_request", "missing args".into()))?).map_err(|e| ("invalid_request", e.to_string()))?;
+                if args.len() > 16 || args.iter().any(|arg| arg.len() > 256 || arg.contains('\0')) { return Err(("invalid_request", "invalid CLI arguments".into())); }
+                let cli = service_core_path().parent().map(|dir| dir.join("easytier-cli.exe")).ok_or(("core_not_found", "CLI path unavailable".into()))?;
+                let mut command = std::process::Command::new(cli);
+                command.args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+                #[cfg(windows)] std::os::windows::process::CommandExt::creation_flags(&mut command, 0x08000000);
+                let mut child = command.spawn().map_err(|e| ("core_not_found", e.to_string()))?;
+                match wait_timeout::ChildExt::wait_timeout(&mut child, std::time::Duration::from_secs(5)).map_err(|e| ("operation_timeout", e.to_string()))? {
+                    Some(status) => { let output = child.wait_with_output().map_err(|e| ("operation_timeout", e.to_string()))?; if status.success() { String::from_utf8(output.stdout).map(serde_json::Value::String).map_err(|e| ("invalid_response", e.to_string())) } else { Err(("operation_failed", String::from_utf8_lossy(&output.stderr).to_string())) } }
+                    None => { let _ = child.kill(); let _ = child.wait(); Err(("operation_timeout", "CLI 查询超时".into())) }
+                }
+            },
             "get_task_status" => { let id = req.payload.get("task_id").and_then(|v| v.as_str()).ok_or(("invalid_request", "missing task_id".into()))?; let task = tasks.lock().unwrap().get(id).cloned().ok_or(("invalid_request", "task not found".into()))?; Ok(serde_json::json!({"task_id": id, "phase": task.phase, "downloaded_bytes": task.downloaded_bytes, "total_bytes": task.total_bytes, "percent": task.percent, "message": task.message, "result": task.result, "error": task.error})) },
             "update_kernel" => {
                 let proxy = req.payload.get("proxy").and_then(|v| v.as_str()).unwrap_or("direct").to_string();
