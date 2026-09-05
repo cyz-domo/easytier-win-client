@@ -188,23 +188,26 @@ mod windows_service {
     }
 
     fn service_core_path() -> std::path::PathBuf {
-        let fallback = std::path::PathBuf::from("core/easytier-core.exe");
-        let Some(exe) = std::env::current_exe().ok() else {
-            return fallback;
-        };
-        let Some(dir) = exe.parent() else {
-            return fallback;
-        };
-        [
-            dir.join("core/easytier-core.exe"),
-            dir.join("resources/core/easytier-core.exe"),
-            dir.parent()
-                .map(|p| p.join("core/easytier-core.exe"))
-                .unwrap_or_default(),
-        ]
-        .into_iter()
-        .find(|path| path.exists())
-        .unwrap_or_else(|| dir.join("core/easytier-core.exe"))
+        // Mirror the GUI's runtime_dir candidates: the service CWD is
+        // System32, so relative lookups must be anchored at the exe dir.
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidates.push(dir.join("core"));
+                candidates.push(dir.join("../core"));
+                candidates.push(dir.join("../../../core"));
+                candidates.push(dir.join("resources/core"));
+                candidates.push(dir.join("../resources/core"));
+            }
+        }
+        candidates.push(std::path::PathBuf::from("core"));
+        for c in &candidates {
+            let core = c.join("easytier-core.exe");
+            if core.exists() {
+                return core;
+            }
+        }
+        std::path::PathBuf::from("core/easytier-core.exe")
     }
 
     fn handle(
