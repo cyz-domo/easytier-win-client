@@ -279,6 +279,7 @@ export default function App() {
     try {
       if (serviceMode) {
         await serviceRequest('sync_instance', {
+          id: current.id,
           instance_id: current.id, name: current.name, config_toml: encodeTOML(current.config),
           rpc_port: current.rpcPort, auto_start: current.autoStart ?? false,
           desired_state: running ? 'stopped' : 'running',
