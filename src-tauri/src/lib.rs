@@ -680,6 +680,11 @@ fn install_service() -> Result<String, String> {
             "service_install_failed: cannot resolve interactive user SID".to_string()
         })?;
         let service_path = service.display().to_string().replace('"', "\\\"");
+        // Persist the SID where the service can read it even if the SCM
+        // fails to hand the binPath arguments through to service_main.
+        let sid_dir = config_store::data_dir();
+        let _ = std::fs::create_dir_all(&sid_dir);
+        let _ = std::fs::write(sid_dir.join("interactive-user.sid"), &trusted_sid);
         let command = format!("$ErrorActionPreference='Stop'; $p='{}'; $bin='\\\"'+$p+'\\\" --interactive-user-sid={}' ; & sc.exe stop EasyTierService 2>$null; & sc.exe create EasyTierService binPath= $bin start= auto DisplayName= 'EasyTier Service'; if ($LASTEXITCODE -ne 0) {{ & sc.exe config EasyTierService binPath= $bin start= auto; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }} }}; & sc.exe description EasyTierService 'EasyTier background service'; & sc.exe start EasyTierService; exit $LASTEXITCODE", service_path, trusted_sid);
         let status = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &format!("Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile','-NonInteractive','-Command','{}'", command.replace('\'', "''"))])

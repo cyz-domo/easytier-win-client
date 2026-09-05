@@ -107,7 +107,10 @@ mod windows_service {
                     .filter(|sid| !sid.is_empty())
             })
             .ok_or_else(|| {
-                "missing trusted interactive user SID; refusing to start IPC".to_string()
+                format!(
+                    "missing trusted interactive user SID; refusing to start IPC; service args: {:?}",
+                    args.iter().map(|a| a.to_string_lossy().to_string()).collect::<Vec<_>>()
+                )
             })?;
         status_handle
             .set_service_status(ServiceStatus {
