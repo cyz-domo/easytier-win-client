@@ -114,6 +114,7 @@ fn service_query() -> ServiceInstallation {
     {
         let output = Command::new("sc.exe")
             .args(["query", "EasyTierService"])
+            .creation_flags(0x08000000)
             .output();
         match output {
             Ok(output) if output.status.success() => {
@@ -630,6 +631,7 @@ fn service_request(request: Value) -> Result<Value, String> {
 fn scm_command(args: &[&str], code: &str) -> Result<String, String> {
     let output = Command::new("sc.exe")
         .args(args)
+        .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("{code}: {e}"))?;
     if output.status.success() {
@@ -687,7 +689,8 @@ fn install_service() -> Result<String, String> {
         let _ = std::fs::write(sid_dir.join("interactive-user.sid"), &trusted_sid);
         let command = format!("$ErrorActionPreference='Stop'; $p='{}'; $bin='\\\"'+$p+'\\\" --interactive-user-sid={}' ; & sc.exe stop EasyTierService 2>$null; & sc.exe create EasyTierService binPath= $bin start= auto DisplayName= 'EasyTier Service'; if ($LASTEXITCODE -ne 0) {{ & sc.exe config EasyTierService binPath= $bin start= auto; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }} }}; & sc.exe description EasyTierService 'EasyTier background service'; & sc.exe start EasyTierService; exit $LASTEXITCODE", service_path, trusted_sid);
         let status = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &format!("Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile','-NonInteractive','-Command','{}'", command.replace('\'', "''"))])
+            .args(["-NoProfile", "-NonInteractive", "-Command", &format!("Start-Process powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-Command','{}'", command.replace('\'', "''"))])
+            .creation_flags(0x08000000)
             .status().map_err(|e| format!("service_install_failed: {e}"))?;
         if status.success() {
             Ok("后台服务已安装并启动".into())
@@ -706,7 +709,7 @@ fn start_service() -> Result<String, String> {
     #[cfg(windows)]
     {
         let command = "Start-Service -Name EasyTierService";
-        let status = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &format!("Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList '-NoProfile','-NonInteractive','-Command','{}'", command)]).status().map_err(|e| format!("service_start_failed: {e}"))?;
+        let status = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &format!("Start-Process powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-Command','{}'", command)]).creation_flags(0x08000000).status().map_err(|e| format!("service_start_failed: {e}"))?;
         if status.success() {
             Ok("后台服务已启动".into())
         } else {
