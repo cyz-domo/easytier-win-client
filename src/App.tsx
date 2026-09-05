@@ -87,6 +87,10 @@ export default function App() {
   const [routes, setRoutes] = useState<RouteInfo[]>([]);
   const [node, setNode] = useState<NodeStatus | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
+  const [networkLogs, setNetworkLogs] = useState<string[]>([]);
+  const [logView, setLogView] = useState<'runtime' | 'network'>('runtime');
+  const [isElevated, setIsElevated] = useState<boolean | null>(null);
+  const [elevationNoticeShown, setElevationNoticeShown] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [secretVisible, setSecretVisible] = useState(false);
   const [visibleCols, setVisibleCols] = useState<PeerColumn[]>(() =>
@@ -138,7 +142,37 @@ export default function App() {
   };
   useEffect(() => { void refreshService(); }, []);
 
-  useEffect(() => { localStorage.setItem('easytier.peer-cols.v1', JSON.stringify(visibleCols)); }, [visibleCols]);
+  const normalizeNetworkLogs = (value: string[] | string | { text?: string } | null | undefined): string[] => {
+    if (Array.isArray(value)) return value;
+    const text = typeof value === 'string' ? value : value?.text || '';
+    return text.split(/\r?\n/).filter(Boolean);
+  };
+
+  useEffect(() => { invoke<boolean>('is_elevated').then(setIsElevated).catch(() => setIsElevated(null)); }, []);
+  useEffect(() => {
+    if (serviceMode || isElevated !== false) return;
+    const seen = sessionStorage.getItem('easytier.elevation-notice.v1') === '1';
+    setElevationNoticeShown(seen);
+  }, [serviceMode, isElevated]);
+  const clearNetworkLogs = () => setNetworkLogs([]);
+  useEffect(() => {
+    if (current?.status !== 'running') { clearNetworkLogs(); return; }
+    let alive = true;
+    let timer: number | null = null;
+    const refresh = async () => {
+      try {
+        const value = serviceMode
+          ? await serviceRequest<string[] | string>('get_network_logs', { instance_id: current.id })
+          : await invoke<string[] | string>('get_network_logs', { id: current.id });
+        if (!alive) return;
+        setNetworkLogs(normalizeNetworkLogs(value));
+      } catch { /* log bridge may be unavailable while the core starts */ }
+      finally { if (alive) timer = window.setTimeout(() => void refresh(), refreshSecs * 1000); }
+    };
+    void refresh();
+    return () => { alive = false; if (timer != null) window.clearTimeout(timer); };
+  }, [current?.id, current?.status, serviceMode, refreshSecs]);
+
   useEffect(() => { localStorage.setItem('easytier.refresh.v1', JSON.stringify(refreshSecs)); }, [refreshSecs]);
   useEffect(() => { localStorage.setItem('easytier.kernel-update-proxy.v1', JSON.stringify(kernelProxy)); }, [kernelProxy]);
   useEffect(() => {
@@ -259,6 +293,13 @@ export default function App() {
   const toggle = async () => {
     if (kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)) return;
     const running = current.status === 'running';
+    if (!running && !serviceMode && isElevated === false && !elevationNoticeShown) {
+      const message = '当前为普通权限运行，兼容模式启动网络可能失败。请右键客户端并选择“以管理员身份运行”。';
+      addLog(`权限提示：${message}`);
+      alert(message);
+      sessionStorage.setItem('easytier.elevation-notice.v1', '1');
+      setElevationNoticeShown(true);
+    }
     if (!running) {
       // Pre-flight: detect listener port conflicts between instances so the
       // user can change the port instead of hitting an opaque core failure.
@@ -681,11 +722,14 @@ export default function App() {
         {tab === 'logs' && (
           <div className="card">
             <div className="card-title-row">
-              <h3 className="card-title">运行日志</h3>
-              <button className="ghost" onClick={() => setLogs([])}>清空</button>
+              <div className="segmented" role="tablist" aria-label="日志类型">
+                <button className={logView === 'runtime' ? 'seg active' : 'seg'} onClick={() => setLogView('runtime')}>运行日志</button>
+                <button className={logView === 'network' ? 'seg active' : 'seg'} onClick={() => setLogView('network')}>组网日志</button>
+              </div>
+              <button className="ghost" onClick={() => logView === 'runtime' ? setLogs([]) : clearNetworkLogs()}>清空</button>
             </div>
             <div className="log-pane" ref={el => { if (el && logTimer.current == null) el.scrollTop = el.scrollHeight; }}>
-              {logs.length === 0 ? <p className="list-empty">暂无日志</p> : logs.map((l, i) => <div className="log-line" key={i}>{l}</div>)}
+              {(logView === 'runtime' ? logs : networkLogs).length === 0 ? <p className="list-empty">暂无{logView === 'runtime' ? '运行' : '组网'}日志</p> : (logView === 'runtime' ? logs : networkLogs).map((l, i) => <div className="log-line" key={i}>{l}</div>)}
             </div>
           </div>
         )}

@@ -12,16 +12,34 @@
   DetailPrint "Stopping existing EasyTier Service..."
   nsExec::ExecToLog 'sc.exe stop EasyTierService'
   Pop $0
-  ; Give a normal service stop a chance to finish.
   Sleep 2000
-  ; If the service is stuck (for example in START_PENDING), terminate only
-  ; the process currently owned by this service, then remove its SCM entry.
-  nsExec::ExecToLog 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$s=Get-CimInstance Win32_Service -Filter \"Name=''EasyTierService''\" -ErrorAction SilentlyContinue; if($$s -and $$s.ProcessId -gt 0){Stop-Process -Id $$s.ProcessId -Force -ErrorAction SilentlyContinue}"'
+  ; QueryEx output is parsed by a temporary PowerShell script. This handles
+  ; START_PENDING and avoids passing the whole sc.exe output as a PID.
+  FileOpen $1 "$PLUGINSDIR\stop-service.ps1" w
+  FileWrite $1 "$$s = Get-CimInstance Win32_Service | Where-Object Name -eq 'EasyTierService' | Select-Object -First 1$\r$\n"
+  FileWrite $1 "if ($$s -and $$s.ProcessId -gt 0) { Stop-Process -Id $$s.ProcessId -Force -ErrorAction SilentlyContinue }$\r$\n"
+  FileClose $1
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\stop-service.ps1"'
   Pop $0
-  Sleep 1000
-  nsExec::ExecToLog 'sc.exe delete EasyTierService'
-  Pop $0
-  Sleep 1000
+  ; Retry delete and confirm the SCM entry is gone before continuing.
+  StrCpy $1 0
+  service_delete_loop:
+    nsExec::ExecToLog 'sc.exe delete EasyTierService'
+    Pop $0
+    Sleep 1000
+    nsExec::ExecToStack 'sc.exe query EasyTierService'
+    Pop $2
+    Pop $3
+    ${If} $2 != 0
+      Goto service_deleted
+    ${EndIf}
+    IntOp $1 $1 + 1
+    ${If} $1 < 15
+      Goto service_delete_loop
+    ${EndIf}
+    MessageBox MB_ICONSTOP|MB_OK "无法停止或删除 EasyTierService。请重启 Windows 后再次运行卸载程序。"
+    Abort
+  service_deleted:
 !macroend
 
 ; Resolve the original interactive user's SID via the explorer process owner.
@@ -79,9 +97,13 @@ Function trim_sid
   Exch $R0
 FunctionEnd
 
-!macro NSIS_HOOK_POSTINSTALL
-  ; Remove a previous registration before creating the new path.
+!macro NSIS_HOOK_PREINSTALL
+  ; Stop/remove the old service before NSIS starts copying files. The old
+  ; service may lock core DLL/SYS files, especially when upgrading in place.
   !insertmacro _EasyTierStopService
+!macroend
+
+!macro NSIS_HOOK_POSTINSTALL
   !insertmacro _EasyTierResolveUserSid
   ${If} $R8 == ""
     DetailPrint "Warning: cannot resolve interactive user SID; skipping service auto-install. Use app settings to install it."
@@ -96,6 +118,12 @@ FunctionEnd
       DetailPrint "Warning: easytier-service.exe is missing; service was not registered."
     ${Else}
       DetailPrint "Installing EasyTier Service..."
+      ; Persist the trusted SID beside the installed service. This avoids
+      ; relying on optional NSIS $COMMONAPPDATA expansion and is readable by
+      ; LocalSystem. The installer owns this file; users cannot modify it.
+      FileOpen $1 "$INSTDIR\interactive-user.sid" w
+      FileWrite $1 "$R8$\r$\n"
+      FileClose $1
       nsExec::ExecToLog 'sc.exe create EasyTierService binPath= "\"$R9\" --interactive-user-sid=$R8" start= auto DisplayName= "EasyTier Service"'
       Pop $0
       ${If} $0 = 0
@@ -116,12 +144,7 @@ FunctionEnd
 
 !macro NSIS_HOOK_PREUNINSTALL
   !insertmacro _EasyTierStopService
-  DetailPrint "Removing EasyTier Service..."
-  nsExec::ExecToLog 'sc.exe delete EasyTierService'
-  Pop $0
-  ${If} $0 != 0
-    DetailPrint "Warning: service deletion failed (error $0). Files may remain locked; retry uninstall."
-  ${EndIf}
+  DetailPrint "EasyTier Service removed."
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

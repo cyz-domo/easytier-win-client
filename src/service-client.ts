@@ -13,7 +13,8 @@ export type ServiceCommand =
   | 'get_task_status'
   | 'install_service'
   | 'start_service'
-  | 'repair_service';
+  | 'repair_service'
+  | 'get_network_logs';
 
 export interface ServiceRequest<T = Record<string, unknown>> {
   protocol_version: 1;
