@@ -137,8 +137,11 @@ impl RuntimeManager {
         command
             .arg("--config-file")
             .arg(path)
-            .arg("--rpc-portal")
-            .arg(format!("127.0.0.1:{}", cfg.rpc_port))
+            .args(crate::remote_rpc::build_rpc_portal_args(
+                cfg.remote_manage_enabled,
+                cfg.rpc_port,
+                &cfg.rpc_whitelist_cidrs,
+            ))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

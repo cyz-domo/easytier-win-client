@@ -63,6 +63,10 @@ struct RestartInstance {
     id: String,
     config: String,
     rpc_port: u16,
+    #[serde(default)]
+    remote_manage_enabled: bool,
+    #[serde(default)]
+    rpc_whitelist_cidrs: Vec<String>,
 }
 
 #[derive(Default)]
@@ -220,6 +224,8 @@ fn start_instance(
     id: String,
     config: String,
     rpc_portal: Option<String>,
+    remote_manage_enabled: Option<bool>,
+    rpc_whitelist_cidrs: Option<Vec<String>>,
     dir_override: Option<String>,
     state: tauri::State<'_, Mutex<RuntimeProcesses>>,
 ) -> Result<InstanceState, String> {
@@ -248,7 +254,21 @@ fn start_instance(
         .stderr(Stdio::piped());
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
-    if let Some(portal) = rpc_portal {
+    if remote_manage_enabled == Some(true) {
+        // Exposed portal replaces the loopback one; reuse the caller-supplied
+        // port. Loopback plus user CIDRs are merged by the shared builder.
+        let port = rpc_portal
+            .as_deref()
+            .and_then(|s| s.rsplit(':').next())
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(15888);
+        let args = remote_rpc::build_rpc_portal_args(
+            true,
+            port,
+            rpc_whitelist_cidrs.as_deref().unwrap_or(&[]),
+        );
+        cmd.args(args);
+    } else if let Some(portal) = rpc_portal.as_deref() {
         cmd.arg("--rpc-portal").arg(portal);
     }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
@@ -414,8 +434,11 @@ fn update_kernel(
             let mut cmd = Command::new(core);
             cmd.arg("--config-file")
                 .arg(config_path)
-                .arg("--rpc-portal")
-                .arg(format!("127.0.0.1:{}", instance.rpc_port))
+                .args(remote_rpc::build_rpc_portal_args(
+                    instance.remote_manage_enabled,
+                    instance.rpc_port,
+                    &instance.rpc_whitelist_cidrs,
+                ))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -659,6 +682,22 @@ fn repair_service() -> Result<String, String> {
     install_service()
 }
 
+#[tauri::command]
+async fn remote_config_discover(host: String, port: u16, virtual_ip: String) -> Result<Value, String> {
+    let info = remote_rpc::discover_remote_instance(&host, port, &virtual_ip).await?;
+    serde_json::to_value(info).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn remote_config_load(host: String, port: u16, instance_id: String) -> Result<Value, String> {
+    remote_rpc::load_remote_config(&host, port, &instance_id).await
+}
+
+#[tauri::command]
+async fn remote_config_patch(host: String, port: u16, instance_id: String, patch: Value) -> Result<Value, String> {
+    remote_rpc::patch_remote_config(&host, port, &instance_id, patch).await
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(RuntimeProcesses::default()))
@@ -710,7 +749,10 @@ pub fn run() {
             service_request,
             install_service,
             start_service,
-            repair_service
+            repair_service,
+            remote_config_discover,
+            remote_config_load,
+            remote_config_patch
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

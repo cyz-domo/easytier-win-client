@@ -132,3 +132,7 @@ button.primary,button.stop{border:0;border-radius:8px;padding:10px 18px;font:inh
 button,select,input,textarea{font-weight:450}button.primary,button.stop,.card-title,h1,h2,h3,.field-label,.data-table th,.status-card h2{font-weight:600}
 .service-banner{display:flex;align-items:center;gap:12px;background:#fff8e6;border:1px solid #f1d99b;border-radius:10px;padding:11px 14px;margin-bottom:18px;color:#765b16;font-size:12px}.service-banner span{flex:1}.service-banner.service-online{background:#eefaf1;border-color:#b9e4c3;color:#26733b}.service-state{font-size:11px;color:#c77700;background:#fff4d6;border-radius:999px;padding:4px 8px;font-weight:600}.service-state.online{color:#269c45;background:#e6f7ea}.service-actions{display:flex;gap:8px;margin-top:12px}
 @media(max-width:860px){aside{width:200px}.content{padding:30px 24px}.config-grid{grid-template-columns:1fr}.grid-2,.grid-3{grid-template-columns:1fr}.status-meta{display:none}.metrics{grid-template-columns:1fr}.kernel-progress-global{left:200px;padding-left:18px;padding-right:18px}}
+
+/* Remote config dialog */
+.modal-overlay{position:fixed;inset:0;background:rgba(15,18,25,.45);display:flex;align-items:center;justify-content:center;z-index:100;padding:24px}
+.modal-card{background:var(--panel,#fff);border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.25);max-width:640px;width:100%;max-height:85vh;overflow-y:auto;padding:16px 18px}

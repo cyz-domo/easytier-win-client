@@ -18,6 +18,15 @@ pub struct InstanceConfig {
     pub desired_state: DesiredState,
     #[serde(default)]
     pub last_error: Option<String>,
+    /// When true the core RPC portal listens on 0.0.0.0 so other nodes on
+    /// the virtual network can manage this instance's config remotely.
+    #[serde(default)]
+    pub remote_manage_enabled: bool,
+    /// CIDRs allowed to reach the RPC portal when remote management is on.
+    /// Loopback is always appended by the launcher; user supplies virtual
+    /// network segments only.
+    #[serde(default)]
+    pub rpc_whitelist_cidrs: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

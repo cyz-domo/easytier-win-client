@@ -5,6 +5,7 @@ import { defaultConfig, listenersForInstance, NetworkConfig, validateConfig } fr
 import { decodeTOML, encodeTOML } from './toml-codec';
 import { ConfigEditor } from './ConfigEditor';
 import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, latencyTone, parseNodeJSON, parsePeerJSON, parseRouteJSON, routeTone } from './status-data';
+import { RemoteConfigDialog } from './RemoteConfigDialog';
 import { getServiceStatus, serviceRequest, ServiceInstanceState, ServiceStatus } from './service-client';
 
 type Status = 'running' | 'stopped' | 'starting' | 'stopping' | 'failed';
@@ -19,6 +20,8 @@ interface Instance {
   autoStart?: boolean;
   desiredState?: 'stopped' | 'running';
   lastError?: string | null;
+  remoteManageEnabled?: boolean;
+  rpcWhitelistCidrs?: string[];
 }
 
 const load = <T,>(k: string, d: T): T => {
@@ -99,6 +102,7 @@ export default function App() {
   const [refreshSecs, setRefreshSecs] = useState<RefreshInterval>(() => load('easytier.refresh.v1', 5));
   const [showDisplaySettings, setShowDisplaySettings] = useState(false);
   const [showPeerNodes, setShowPeerNodes] = useState<boolean>(() => load('easytier.show-peer-nodes.v1', false));
+  const [remoteEditHost, setRemoteEditHost] = useState<string | null>(null);
   const [tomlDraft, setTomlDraft] = useState<string | null>(null);
   const [tomlDirty, setTomlDirty] = useState(false);
   const [tomlError, setTomlError] = useState<string | null>(null);
@@ -373,8 +377,17 @@ export default function App() {
       } else {
         const errors = validateConfig(current.config);
         if (errors.length) throw new Error(errors[0].message);
+        if (current.remoteManageEnabled && !(current.rpcWhitelistCidrs ?? []).length) {
+          throw new Error('开启远程管理必须填写 RPC 白名单（填 EasyTier 虚拟网段，如 10.126.126.0/24）');
+        }
         const toml = encodeTOML(current.config);
-        await invoke('start_instance', { id: current.id, config: toml, rpcPortal: `127.0.0.1:${current.rpcPort}` });
+        await invoke('start_instance', {
+          id: current.id,
+          config: toml,
+          rpcPortal: current.remoteManageEnabled ? undefined : `127.0.0.1:${current.rpcPort}`,
+          remoteManageEnabled: current.remoteManageEnabled ?? false,
+          rpcWhitelistCidrs: current.rpcWhitelistCidrs ?? [],
+        });
         // Give the core a moment, then check whether it exited instantly
         // (port conflict / config error) so we fail instead of hanging.
         await new Promise(r => setTimeout(r, 1200));
@@ -655,9 +668,12 @@ export default function App() {
                     const route = routes.find(r => r.hostname === p.hostname);
                     const isLocal = p.cost === 'Local';
                     const nodeType = isLocal ? '本机' : (route && (route.path_len ?? 0) > 1 ? '服务节点' : '普通节点');
+                    const remoteIp = p.ipv4 || route?.ipv4?.split('/')[0];
                     return (
                       <tr key={String(p.id ?? i)}>
-                        <td>{String(p.id ?? '—')}<div className="cell-sub">{nodeType}</div></td>
+                        <td>{String(p.id ?? '—')}<div className="cell-sub">{nodeType}</div>
+                          {!isLocal && remoteIp && <button type="button" className="mini-button" onClick={() => setRemoteEditHost(remoteIp)}>编辑配置</button>}
+                        </td>
                         {visibleCols.includes('ipv4') && <td>{p.ipv4 || '—'}</td>}
                         {visibleCols.includes('cidr') && <td>{p.cidr || '—'}</td>}
                         {visibleCols.includes('hostname') && <td>{p.hostname || '—'}</td>}
@@ -815,11 +831,28 @@ export default function App() {
                           if (serviceMode) { try { await serviceRequest('set_auto_start', { instance_id: i.id, auto_start: next }); } catch (e) { alert(`更新自动启动失败：${String(e)}`); return; } }
                           setInstances(xs => xs.map(x => x.id === i.id ? { ...x, autoStart: next } : x));
                         }}><span className="knob" /></button><span className="hint-inline">自动启动</span>
+                        <button className={i.remoteManageEnabled ? 'switch on' : 'switch'} role="switch" aria-checked={i.remoteManageEnabled ?? false}
+                          title="允许虚拟网内其他设备修改本实例配置（RPC 监听 0.0.0.0）"
+                          onClick={() => setInstances(xs => xs.map(x => (x.id === i.id && !(x.rpcWhitelistCidrs ?? []).length && !x.remoteManageEnabled
+                            ? x
+                            : { ...x, remoteManageEnabled: x.id === i.id ? !(x.remoteManageEnabled ?? false) : x.remoteManageEnabled })))}
+                        ><span className="knob" /></button><span className="hint-inline">允许远程管理</span>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              {current?.remoteManageEnabled && (
+                <label className="field">
+                  <span className="field-label">RPC 白名单（当前实例，逗号分隔 CIDR，环回地址自动附加）</span>
+                  <input className="field-input" value={(current.rpcWhitelistCidrs ?? []).join(',')}
+                    placeholder="10.126.126.0/24"
+                    onChange={e => setInstances(xs => xs.map(x => (x.id === current.id
+                      ? { ...x, rpcWhitelistCidrs: e.target.value.split(',').map(s => s.trim()).filter(Boolean) }
+                      : x)))} />
+                  <span className="hint-inline">开启后 RPC 监听 0.0.0.0，会暴露到物理局域网；白名单务必只填 EasyTier 虚拟网段。</span>
+                </label>
+              )}
             </div>
             <div className="card">
               <h3 className="card-title">关于</h3>
@@ -831,6 +864,7 @@ export default function App() {
           </>
         )}
       </section>
+      {remoteEditHost && <RemoteConfigDialog host={remoteEditHost} onClose={() => setRemoteEditHost(null)} />}
     </main>
   );
 }
