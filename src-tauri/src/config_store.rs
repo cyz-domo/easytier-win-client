@@ -3,6 +3,7 @@ use std::{fs, io::Write, path::{Path, PathBuf}};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstanceConfig {
+    #[serde(alias = "instance_id")]
     pub id: String,
     #[serde(default)] pub name: String,
     pub config_toml: String,
