@@ -2,6 +2,7 @@
 mod config_store;
 mod ipc;
 mod kernel_updater;
+mod remote_rpc;
 mod runtime_manager;
 
 #[cfg(windows)]
