@@ -349,6 +349,17 @@ mod windows_service {
                 }
                 Ok(serde_json::to_value(runtime.lock().unwrap().snapshot(c)).unwrap())
             }
+            "stop_all_instances" => {
+                for c in s.instances.iter_mut() {
+                    if c.desired_state == DesiredState::Running
+                        || runtime.lock().unwrap().children.contains_key(&c.id)
+                    {
+                        c.desired_state = DesiredState::Stopped;
+                        let _ = runtime.lock().unwrap().stop(c);
+                    }
+                }
+                Ok(serde_json::json!({"stopped": true}))
+            }
             "set_auto_start" => {
                 let id = req
                     .payload

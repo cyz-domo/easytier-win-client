@@ -5,11 +5,41 @@ import { defaultConfig, listenersForInstance, NetworkConfig, validateConfig } fr
 import { decodeTOML, encodeTOML } from './toml-codec';
 import { ConfigEditor } from './ConfigEditor';
 import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, latencyTone, parseNodeJSON, parsePeerJSON, parseRouteJSON, routeTone } from './status-data';
-import { RemoteConfigDialog } from './RemoteConfigDialog';
+import { RemoteConfigDialog, RemoteConfigEditor } from './RemoteConfigDialog';
+
+function RemoteConfigPanel({ host, running, peers, onPickPeer }: {
+  host: string | null;
+  running: boolean;
+  peers: PeerInfo[];
+  onPickPeer: (ip: string) => void;
+}) {
+  if (!running) return <div className="card"><p className="list-empty">网络未运行。启动网络后才能访问远端节点的 RPC。</p></div>;
+  return (
+    <>
+      <div className="card">
+        <h3 className="card-title">选择远端节点</h3>
+        {peers.length === 0 && <p className="list-empty">暂无在线远端节点。</p>}
+        <div className="remote-peer-list">
+          {peers.map(p => {
+            const ip = p.ipv4 || '—';
+            return (
+              <button key={String(p.id ?? ip)} type="button" className={host === ip ? 'remote-peer active' : 'remote-peer'}
+                onClick={() => onPickPeer(ip)}>
+                <strong>{p.hostname || '未命名节点'}</strong>
+                <span className="hint-inline">{ip} · {p.version || '—'}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {host && <div className="card"><h3 className="card-title">远程配置 — {host}</h3><RemoteConfigEditor key={host} host={host} /></div>}
+    </>
+  );
+}
 import { getServiceStatus, serviceRequest, ServiceInstanceState, ServiceStatus } from './service-client';
 
 type Status = 'running' | 'stopped' | 'starting' | 'stopping' | 'failed';
-type Tab = 'status' | 'peers' | 'routes' | 'config' | 'logs' | 'settings';
+type Tab = 'status' | 'peers' | 'routes' | 'config' | 'remote' | 'logs' | 'settings';
 
 interface Instance {
   id: string;
@@ -85,6 +115,7 @@ export default function App() {
   const [activeId, setActiveId] = useState<string>(() => load('easytier.active.v2', ''));
   const [tab, setTab] = useState<Tab>('status');
   const [pollEpoch, setPollEpoch] = useState(0);
+  const [remoteTabHost, setRemoteTabHost] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [runtime, setRuntime] = useState<runtimeInfo | null>(null);
   const [peers, setPeers] = useState<PeerInfo[]>([]);
@@ -98,7 +129,7 @@ export default function App() {
   const [statusError, setStatusError] = useState<string | null>(null);
   const [secretVisible, setSecretVisible] = useState(false);
   const [visibleCols, setVisibleCols] = useState<PeerColumn[]>(() =>
-    load('easytier.peer-cols.v1', PEER_COLUMNS.filter(c => c.defaultOn).map(c => c.key)));
+    load('easytier.peer-cols.v2', PEER_COLUMNS.filter(c => c.defaultOn).map(c => c.key)));
   const [refreshSecs, setRefreshSecs] = useState<RefreshInterval>(() => load('easytier.refresh.v1', 5));
   const [showDisplaySettings, setShowDisplaySettings] = useState(false);
   const [showPeerNodes, setShowPeerNodes] = useState<boolean>(() => load('easytier.show-peer-nodes.v1', false));
@@ -523,7 +554,7 @@ export default function App() {
   const running = current.status === 'running';
   const statusText = { running: '网络运行中', stopped: '网络已停止', starting: '正在启动…', stopping: '正在停止…', failed: '启动失败' }[current.status];
 
-  const navItems: [Tab, string][] = [['status', '状态总览'], ['peers', '组网成员'], ['routes', '路由信息'], ['config', '组网配置'], ['logs', '运行日志'], ['settings', '设置']];
+  const navItems: [Tab, string][] = [['status', '状态总览'], ['peers', '组网成员'], ['routes', '路由信息'], ['config', '组网配置'], ['remote', '远程管理'], ['logs', '运行日志'], ['settings', '设置']];
 
   return (
     <main className="app-shell">
@@ -623,7 +654,11 @@ export default function App() {
                     {PEER_COLUMNS.map(c => (
                       <label key={c.key} className="check-item">
                         <input type="checkbox" checked={visibleCols.includes(c.key)}
-                          onChange={e => setVisibleCols(xs => e.target.checked ? [...xs, c.key] : xs.filter(x => x !== c.key))} />
+                          onChange={e => setVisibleCols(xs => {
+                            const next = e.target.checked ? [...xs, c.key] : xs.filter(x => x !== c.key);
+                            localStorage.setItem('easytier.peer-cols.v2', JSON.stringify(next));
+                            return next;
+                          })} />
                         {c.label}
                       </label>
                     ))}
@@ -648,7 +683,7 @@ export default function App() {
               <div className="table-scroll">
               <table className="data-table">
                 <thead><tr>
-                  <th>节点 ID</th>
+                  {visibleCols.includes('nodeid') && <th>节点 ID</th>}
                   {visibleCols.includes('ipv4') && <th>IPv4</th>}
                   {visibleCols.includes('cidr') && <th>网段</th>}
                   {visibleCols.includes('hostname') && <th>主机名</th>}
@@ -669,14 +704,19 @@ export default function App() {
                     const isLocal = p.cost === 'Local';
                     const nodeType = isLocal ? '本机' : (route && (route.path_len ?? 0) > 1 ? '服务节点' : '普通节点');
                     const remoteIp = p.ipv4 || route?.ipv4?.split('/')[0];
+                    const openRemote = () => {
+                      if (isLocal || !remoteIp) return;
+                      setRemoteTabHost(remoteIp);
+                      setTab('remote');
+                    };
                     return (
                       <tr key={String(p.id ?? i)}>
-                        <td>{String(p.id ?? '—')}<div className="cell-sub">{nodeType}</div>
-                          {!isLocal && remoteIp && <button type="button" className="mini-button" onClick={() => setRemoteEditHost(remoteIp)}>编辑配置</button>}
-                        </td>
-                        {visibleCols.includes('ipv4') && <td>{p.ipv4 || '—'}</td>}
+                        {visibleCols.includes('nodeid') && <td>{String(p.id ?? '—')}<div className="cell-sub">{nodeType}</div></td>}
+                        {visibleCols.includes('ipv4') && <td>{p.ipv4 || '—'}{!isLocal && remoteIp && <div className="cell-sub">{nodeType}</div>}</td>}
                         {visibleCols.includes('cidr') && <td>{p.cidr || '—'}</td>}
-                        {visibleCols.includes('hostname') && <td>{p.hostname || '—'}</td>}
+                        {visibleCols.includes('hostname') && <td>{!isLocal && remoteIp
+                          ? <button type="button" className="linklike" title="打开远程管理" onClick={openRemote}>{p.hostname || '—'}</button>
+                          : (p.hostname || '—')}</td>}
                         {visibleCols.includes('cost') && <td><span className={`route-badge tone-${routeTone(p.cost)}`}>{p.cost || '—'}</span></td>}
                         {visibleCols.includes('proto') && <td>{p.tunnel_proto || '—'}</td>}
                         {visibleCols.includes('latency') && <td className={`tone-${latencyTone(p.lat_ms)}`}>{p.lat_ms || '—'}</td>}
@@ -758,6 +798,10 @@ export default function App() {
           </div>
         )}
 
+        {tab === 'remote' && (
+          <RemoteConfigPanel host={remoteTabHost} running={running} onPickPeer={(ip) => setRemoteTabHost(ip)} peers={visiblePeers.filter(p => p.cost !== 'Local' && (p.ipv4 || routes.find(r => r.hostname === p.hostname)?.ipv4))} />
+        )}
+
         {tab === 'logs' && (
           <div className="card">
             <div className="card-title-row">
@@ -833,9 +877,7 @@ export default function App() {
                         }}><span className="knob" /></button><span className="hint-inline">自动启动</span>
                         <button className={i.remoteManageEnabled ? 'switch on' : 'switch'} role="switch" aria-checked={i.remoteManageEnabled ?? false}
                           title="允许虚拟网内其他设备修改本实例配置（RPC 监听 0.0.0.0）"
-                          onClick={() => setInstances(xs => xs.map(x => (x.id === i.id && !(x.rpcWhitelistCidrs ?? []).length && !x.remoteManageEnabled
-                            ? x
-                            : { ...x, remoteManageEnabled: x.id === i.id ? !(x.remoteManageEnabled ?? false) : x.remoteManageEnabled })))}
+                          onClick={() => setInstances(xs => xs.map(x => (x.id === i.id ? { ...x, remoteManageEnabled: !(x.remoteManageEnabled ?? false) } : x)))}
                         ><span className="knob" /></button><span className="hint-inline">允许远程管理</span>
                       </td>
                     </tr>

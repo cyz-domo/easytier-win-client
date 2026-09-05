@@ -10,6 +10,7 @@ use named_pipe::PipeClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::{
     collections::HashMap,
@@ -532,6 +533,40 @@ fn is_port_in_use(port: u16) -> bool {
     std::net::TcpListener::bind(("0.0.0.0", port)).is_err()
 }
 
+#[cfg(windows)]
+mod job_object {
+    //! Puts short-lived child processes (easytier-cli) into a kill-on-close
+    //! job so a GUI crash/exit can never leave them behind.
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    pub fn kill_on_close(process_handle: windows_sys::Win32::Foundation::HANDLE) {
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job == 0 {
+                return;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0 {
+                windows_sys::Win32::Foundation::CloseHandle(job);
+                return;
+            }
+            let _ = AssignProcessToJobObject(job, process_handle);
+            // Intentionally leak the job handle: it is closed when our process
+            // exits, which kills every assigned child.
+        }
+    }
+}
+
 #[tauri::command]
 fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<String, String> {
     let (_, cli) = paths(runtime_dir);
@@ -543,6 +578,8 @@ fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<String, Str
     #[cfg(windows)]
     child.creation_flags(0x08000000);
     let mut child = child.spawn().map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    job_object::kill_on_close(child.as_raw_handle() as _);
     match child.wait_timeout(std::time::Duration::from_secs(5)) {
         Ok(Some(status)) => {
             let o = child.wait_with_output().map_err(|e| e.to_string())?;
@@ -721,7 +758,39 @@ pub fn run() {
                             let _ = window.set_focus();
                         }
                     }
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        // Sweep orphaned CLI helper processes, then stop every
+                        // running network before exiting: quitting the client
+                        // means "take my VPN down with it" per product decision.
+                        let (_, cli) = paths(None);
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/F", "/FI", &format!("IMAGENAME eq {}", cli.file_name().unwrap_or_default().to_string_lossy())])
+                            .creation_flags(0x08000000)
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                        if let Ok(mut p) = app.state::<Mutex<RuntimeProcesses>>().lock() {
+                            for (id, mut child) in p.children.drain() {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                let _ = std::fs::remove_file(std::env::temp_dir().join(format!("easytier-{}.toml", id)));
+                            }
+                        }
+                        // Service mode: ask the service to stop all instances.
+                        #[cfg(windows)]
+                        if let Ok(pipe) = PipeClient::connect(r"\\.\pipe\EasyTierService") {
+                            let request = serde_json::json!({
+                                "protocol_version": ipc::PROTOCOL_VERSION,
+                                "request_id": uuid::Uuid::new_v4().to_string(),
+                                "command": "stop_all_instances",
+                                "payload": {},
+                            });
+                            let mut writer = pipe;
+                            let _ = writer.write_all(serde_json::to_vec(&request).unwrap_or_default().as_slice())
+                                .and_then(|_| writer.write_all(b"\n"));
+                        }
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .build(app)?;

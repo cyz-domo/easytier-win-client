@@ -43,10 +43,11 @@ export interface NodeStatus {
 }
 
 export type PeerColumn =
-  | 'ipv4' | 'cidr' | 'hostname' | 'cost' | 'proto' | 'latency'
+  | 'nodeid' | 'ipv4' | 'cidr' | 'hostname' | 'cost' | 'proto' | 'latency'
   | 'loss' | 'rx' | 'tx' | 'nat' | 'version' | 'relay' | 'routes';
 
 export const PEER_COLUMNS: { key: PeerColumn; label: string; defaultOn: boolean }[] = [
+  { key: 'nodeid', label: '节点 ID', defaultOn: false },
   { key: 'ipv4', label: 'IPv4', defaultOn: true },
   { key: 'cidr', label: '网段', defaultOn: false },
   { key: 'hostname', label: '主机名', defaultOn: true },
