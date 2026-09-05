@@ -5,3 +5,4 @@ src-tauri/gen/schemas/
 src-tauri/core-stage/
 src-tauri/service-stage/
 src-tauri/easytier/
+target-full/

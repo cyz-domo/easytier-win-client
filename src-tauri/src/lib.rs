@@ -724,6 +724,45 @@ fn repair_service() -> Result<String, String> {
     install_service()
 }
 
+/// Sweep orphaned CLI helpers, stop every running network (GUI children and
+/// service instances), then exit. Used by both the tray quit action and the
+/// main window close button.
+fn quit_and_stop_networks(app: &tauri::AppHandle) {
+    let (_, cli) = paths(None);
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/FI", &format!("IMAGENAME eq {}", cli.file_name().unwrap_or_default().to_string_lossy())])
+        .creation_flags(0x08000000)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if let Ok(mut p) = app.state::<Mutex<RuntimeProcesses>>().lock() {
+        for (id, mut child) in p.children.drain() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(std::env::temp_dir().join(format!("easytier-{}.toml", id)));
+        }
+    }
+    // Service mode: ask the service to stop all instances. Read the response
+    // before exiting; fire-and-forget writes race with app.exit.
+    #[cfg(windows)]
+    {
+        let request = serde_json::json!({
+            "protocol_version": ipc::PROTOCOL_VERSION,
+            "request_id": uuid::Uuid::new_v4().to_string(),
+            "command": "stop_all_instances",
+            "payload": {},
+        });
+        if let Ok(bytes) = serde_json::to_vec(&request) {
+            if let Ok(mut pipe) = PipeClient::connect(r"\\.\pipe\EasyTierService") {
+                use std::io::{BufRead as _, Write as _};
+                let _ = pipe.write_all(&bytes).and_then(|_| pipe.write_all(b"\n"));
+                let _ = BufReader::new(pipe).read_until(b'\n', &mut Vec::new());
+            }
+        }
+    }
+    app.exit(0);
+}
+
 #[tauri::command]
 async fn remote_config_discover(host: String, port: u16, virtual_ip: String) -> Result<Value, String> {
     let info = remote_rpc::discover_remote_instance(&host, port, &virtual_ip).await?;
@@ -763,45 +802,7 @@ pub fn run() {
                             let _ = window.set_focus();
                         }
                     }
-                    "quit" => {
-                        // Sweep orphaned CLI helper processes, then stop every
-                        // running network before exiting: quitting the client
-                        // means "take my VPN down with it" per product decision.
-                        let (_, cli) = paths(None);
-                        let _ = std::process::Command::new("taskkill")
-                            .args(["/F", "/FI", &format!("IMAGENAME eq {}", cli.file_name().unwrap_or_default().to_string_lossy())])
-                            .creation_flags(0x08000000)
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .status();
-                        if let Ok(mut p) = app.state::<Mutex<RuntimeProcesses>>().lock() {
-                            for (id, mut child) in p.children.drain() {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                                let _ = std::fs::remove_file(std::env::temp_dir().join(format!("easytier-{}.toml", id)));
-                            }
-                        }
-                        // Service mode: ask the service to stop all instances.
-                        // Reuse service_request so we read the response before
-                        // exiting; fire-and-forget writes race with app.exit.
-                        #[cfg(windows)]
-                        {
-                            let request = serde_json::json!({
-                                "protocol_version": ipc::PROTOCOL_VERSION,
-                                "request_id": uuid::Uuid::new_v4().to_string(),
-                                "command": "stop_all_instances",
-                                "payload": {},
-                            });
-                            if let Ok(bytes) = serde_json::to_vec(&request) {
-                                if let Ok(mut pipe) = PipeClient::connect(r"\\.\pipe\EasyTierService") {
-                                    use std::io::{BufRead as _, Write as _};
-                                    let _ = pipe.write_all(&bytes).and_then(|_| pipe.write_all(b"\n"));
-                                    let _ = BufReader::new(pipe).read_until(b'\n', &mut Vec::new());
-                                }
-                            }
-                        }
-                        app.exit(0);
-                    }
+                    "quit" => quit_and_stop_networks(&app),
                     _ => {}
                 })
                 .build(app)?;
@@ -809,8 +810,11 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the window quits the client and takes the networks
+                // down with it (same path as the tray quit action).
                 api.prevent_close();
-                let _ = window.hide();
+                let app = window.app_handle().clone();
+                std::thread::spawn(move || quit_and_stop_networks(&app));
             }
         })
         .invoke_handler(tauri::generate_handler![

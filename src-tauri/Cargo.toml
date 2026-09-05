@@ -36,7 +36,9 @@ url = "2"
 uuid = "1"
 # crates.io only publishes easytier up to 2.0.3; the bundled core is 2.6.4
 # (8428a89), so pull the crate from the project repo pinned to that tag.
-easytier = { git = "https://github.com/EasyTier/EasyTier", tag = "v2.6.4", default-features = false }
+# zstd is required: the official core builds advertise zstd compression on
+# RPC responses, and a client without the feature fails to decode them.
+easytier = { git = "https://github.com/EasyTier/EasyTier", tag = "v2.6.4", default-features = false, features = ["zstd"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
