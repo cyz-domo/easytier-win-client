@@ -94,7 +94,9 @@ export default function App() {
   const [refreshSecs, setRefreshSecs] = useState<RefreshInterval>(() => load('easytier.refresh.v1', 3));
   const [showDisplaySettings, setShowDisplaySettings] = useState(false);
   const [tomlDraft, setTomlDraft] = useState<string | null>(null);
+  const [tomlDirty, setTomlDirty] = useState(false);
   const [tomlError, setTomlError] = useState<string | null>(null);
+  const [configSaved, setConfigSaved] = useState(false);
   const [kernelUpdate, setKernelUpdate] = useState<KernelUpdateProgress | null>(null);
   const [kernelInfo, setKernelInfo] = useState<KernelUpdateInfo | null>(null);
   const [kernelProxy, setKernelProxy] = useState<string>(() => load('easytier.kernel-update-proxy.v1', 'direct'));
@@ -189,10 +191,13 @@ export default function App() {
     let timer: number | null = null;
     const refresh = async () => {
       try {
+        const cli = (args: string[]) => serviceMode
+          ? serviceRequest<string>('run_cli', { args })
+          : invoke<string>('run_cli', { args });
         const [peerText, routeText, nodeText] = await Promise.all([
-          invoke<string>('run_cli', { args: ['--rpc-portal', `127.0.0.1:${current.rpcPort}`, '--output', 'json', 'peer'] }),
-          invoke<string>('run_cli', { args: ['--rpc-portal', `127.0.0.1:${current.rpcPort}`, '--output', 'json', 'route'] }),
-          invoke<string>('run_cli', { args: ['--rpc-portal', `127.0.0.1:${current.rpcPort}`, '--output', 'json', 'node'] }),
+          cli(['--rpc-portal', `127.0.0.1:${current.rpcPort}`, '--output', 'json', 'peer']),
+          cli(['--rpc-portal', `127.0.0.1:${current.rpcPort}`, '--output', 'json', 'route']),
+          cli(['--rpc-portal', `127.0.0.1:${current.rpcPort}`, '--output', 'json', 'node']),
         ]);
         if (!alive) return;
         setPeers(parsePeerJSON(peerText));
@@ -213,7 +218,7 @@ export default function App() {
   const addLog = (line: string) => setLogs(xs => [...xs.slice(-300), `${new Date().toLocaleTimeString()}  ${line}`]);
   useEffect(() => { if (statusError) addLog(`状态查询失败：${statusError}`); }, [statusError]);
 
-  const patchConfig = (patch: Partial<NetworkConfig>) =>
+  const patchConfig = (patch: Partial<NetworkConfig>) => {
     setInstances(xs => xs.map(i => {
       if (i.id !== current.id) return i;
       const config = { ...i.config, ...patch };
@@ -221,6 +226,13 @@ export default function App() {
       const name = patch.network_name !== undefined && patch.network_name.trim() ? patch.network_name : i.name;
       return { ...i, name, config };
     }));
+    setConfigSaved(true);
+    window.setTimeout(() => setConfigSaved(false), 1500);
+  };
+
+  useEffect(() => {
+    if (tomlDraft !== null && !tomlDirty) setTomlDraft(encodeTOML(current.config));
+  }, [current.config, tomlDraft, tomlDirty]);
 
   const addInstance = () => {
     const id = crypto.randomUUID();
@@ -279,7 +291,6 @@ export default function App() {
     try {
       if (serviceMode) {
         await serviceRequest('sync_instance', {
-          id: current.id,
           instance_id: current.id, name: current.name, config_toml: encodeTOML(current.config),
           rpc_port: current.rpcPort, auto_start: current.autoStart ?? false,
           desired_state: running ? 'stopped' : 'running',
@@ -371,7 +382,8 @@ export default function App() {
   };
 
   const startTomlEdit = () => {
-    if (tomlDraft === null) setTomlDraft(encodeTOML(current.config));
+    if (tomlDraft === null || !tomlDirty) setTomlDraft(encodeTOML(current.config));
+    setTomlDirty(false);
     setTomlError(null);
   };
 
@@ -556,6 +568,7 @@ export default function App() {
             {!running && <p className="list-empty">网络未运行，启动后此处显示在线成员。</p>}
             {running && statusError && <p className="list-empty err">状态查询失败：{statusError}</p>}
             {running && !statusError && (
+              <div className="table-scroll">
               <table className="data-table">
                 <thead><tr>
                   <th>节点 ID</th>
@@ -600,6 +613,7 @@ export default function App() {
                   {peers.length === 0 && <tr><td colSpan={14} className="list-empty">暂无在线成员</td></tr>}
                 </tbody>
               </table>
+              </div>
             )}
           </div>
         )}
@@ -609,6 +623,7 @@ export default function App() {
             <h3 className="card-title">路由信息{running ? `（${routes.length}）` : ''}</h3>
             {!running && <p className="list-empty">网络未运行，启动后此处显示路由表。</p>}
             {running && (
+              <div className="table-scroll">
               <table className="data-table">
                 <thead><tr><th>虚拟地址</th><th>主机名</th><th>下一跳</th><th>跳数</th><th>路径延迟</th><th>子网代理</th><th>版本</th></tr></thead>
                 <tbody>
@@ -626,14 +641,16 @@ export default function App() {
                   {routes.length === 0 && <tr><td colSpan={7} className="list-empty">暂无路由</td></tr>}
                 </tbody>
               </table>
+              </div>
             )}
           </div>
         )}
 
         {tab === 'config' && (
           <div className="card config-card-wide">
-            <div className="card-title-row">
-              <input className="title-input" value={current.name} onChange={e => renameInstance(e.target.value)} />
+              <div className="card-title-row">
+                <input className="title-input" value={current.name} onChange={e => renameInstance(e.target.value)} />
+                {configSaved && <span className="save-status" role="status">✓ 已自动保存</span>}
               <div className="title-actions">
                 <button className="ghost" onClick={() => void openTomlFile()}>导入 TOML</button>
                 <button className="ghost" onClick={async () => { try { await importToml(await navigator.clipboard.readText()); } catch (e) { alert(`读取剪贴板失败：${String(e)}`); } }}>剪贴板导入</button>
@@ -648,7 +665,7 @@ export default function App() {
               <textarea
                 className="toml-editor"
                 value={tomlDraft ?? encodeTOML(current.config)}
-                onChange={e => setTomlDraft(e.target.value)}
+                onChange={e => { setTomlDraft(e.target.value); setTomlDirty(true); }}
                 spellCheck={false}
                 rows={18}
               />
