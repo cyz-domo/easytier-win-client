@@ -214,6 +214,20 @@ fn rpc_controller() -> BaseController {
     ctrl
 }
 
+/// A portal that accepts TCP but never answers is almost always the remote
+/// whitelist rejecting a non-loopback source (default allowlist is loopback
+/// only). Translate the raw timeout into an actionable hint.
+fn explain_timeout(method: &str, e: &easytier::proto::rpc_types::error::Error) -> String {
+    let raw = format!("{e:#}");
+    if raw.contains("Timeout") || raw.contains("deadline") {
+        format!(
+            "{method} failed: {raw}。已连上对端但对端未应答：请在对端设备的设置里开启「允许远程管理」并确认其白名单包含本机的虚拟 IP，然后在对端重启网络"
+        )
+    } else {
+        format!("{method} failed: {raw}")
+    }
+}
+
 fn set_connect_cooldown(endpoint: &RpcEndpoint, message: String) {
     if let Ok(mut state) = endpoint.state.lock() {
         state.cooldown_until = Some(Instant::now() + COOLDOWN);
@@ -259,7 +273,7 @@ pub async fn discover_remote_instance(host: &str, port: u16, virtual_ip: &str) -
                     .map_err(|e| format!("connect failed: {e:#}"))?
                     .list_peer(rpc_controller(), ListPeerRequest { instance: None })
                     .await
-                    .map_err(|e| format!("list_peer failed: {e:#}"))
+                    .map_err(|e| explain_timeout("list_peer", &e))
             })
             .await
             .map_err(|_| "discover timed out".to_string())??;
