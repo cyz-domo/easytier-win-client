@@ -115,21 +115,7 @@ export default function App() {
   const current = useMemo(() => instances.find(i => i.id === activeId) ?? instances[0], [instances, activeId]);
   const visiblePeers = useMemo(() => {
     if (showPeerNodes || !current) return peers;
-    const peerTargets = new Set<string>();
-    for (const raw of current.config.peer_urls) {
-      try {
-        const url = new URL(raw);
-        if (url.hostname) peerTargets.add(url.hostname.toLowerCase());
-        if (url.port) peerTargets.add(`${url.hostname.toLowerCase()}:${url.port}`);
-      } catch {
-        const match = raw.match(/^(?:\w+:\/\/)?([^/:]+)(?::(\d+))?/);
-        if (match) { peerTargets.add(match[1].toLowerCase()); if (match[2]) peerTargets.add(`${match[1].toLowerCase()}:${match[2]}`); }
-      }
-    }
-    return peers.filter(peer => {
-      const candidates = [peer.uri, peer.hostname, peer.ipv4, peer.id].filter(Boolean).map(value => String(value).toLowerCase());
-      return !candidates.some(value => peerTargets.has(value) || [...peerTargets].some(target => value.includes(target)));
-    });
+    return peers.filter(peer => !String(peer.hostname ?? '').toLowerCase().startsWith('publicserver'));
   }, [current, peers, showPeerNodes]);
 
   useEffect(() => { localStorage.setItem('easytier.instances.v2', JSON.stringify(instances)); }, [instances]);
