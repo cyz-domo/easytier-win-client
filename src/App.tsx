@@ -81,6 +81,7 @@ export default function App() {
   const [instances, setInstances] = useState<Instance[]>(loadInstances);
   const [activeId, setActiveId] = useState<string>(() => load('easytier.active.v2', ''));
   const [tab, setTab] = useState<Tab>('status');
+  const [pollEpoch, setPollEpoch] = useState(0);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [runtime, setRuntime] = useState<runtimeInfo | null>(null);
   const [peers, setPeers] = useState<PeerInfo[]>([]);
@@ -95,7 +96,7 @@ export default function App() {
   const [secretVisible, setSecretVisible] = useState(false);
   const [visibleCols, setVisibleCols] = useState<PeerColumn[]>(() =>
     load('easytier.peer-cols.v1', PEER_COLUMNS.filter(c => c.defaultOn).map(c => c.key)));
-  const [refreshSecs, setRefreshSecs] = useState<RefreshInterval>(() => load('easytier.refresh.v1', 3));
+  const [refreshSecs, setRefreshSecs] = useState<RefreshInterval>(() => load('easytier.refresh.v1', 5));
   const [showDisplaySettings, setShowDisplaySettings] = useState(false);
   const [showPeerNodes, setShowPeerNodes] = useState<boolean>(() => load('easytier.show-peer-nodes.v1', false));
   const [tomlDraft, setTomlDraft] = useState<string | null>(null);
@@ -224,9 +225,13 @@ export default function App() {
 
   // Poll peer/route status while an instance is running. Self-scheduling
   // timeout: the next round starts only after the previous one settles, so a
-  // hung CLI round can never pile up overlapping rounds.
+  // hung CLI round can never pile up overlapping rounds. Skipped when the
+  // status-affecting tabs are not visible or the window is hidden — each
+  // round spawns three CLI processes, so idle polling is real load.
   useEffect(() => {
     if (current?.status !== 'running') { setPeers([]); setRoutes([]); setNode(null); setStatusError(null); return; }
+    const pollWorthy = tab === 'status' || tab === 'peers' || tab === 'routes';
+    if (!pollWorthy || document.hidden) return;
     let alive = true;
     let timer: number | null = null;
     const refresh = async () => {
@@ -252,7 +257,15 @@ export default function App() {
     };
     void refresh();
     return () => { alive = false; if (timer != null) window.clearTimeout(timer); };
-  }, [current?.id, current?.status, current?.rpcPort, refreshSecs]);
+  }, [current?.id, current?.status, current?.rpcPort, refreshSecs, tab, serviceMode, pollEpoch]);
+
+  // Re-arm status polling when the window becomes visible again; the polling
+  // effect above deliberately skips rounds while document.hidden is true.
+  useEffect(() => {
+    const onVisible = () => setPollEpoch(n => n + 1);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
 
   // Append runtime messages to the log pane.
   const addLog = (line: string) => setLogs(xs => [...xs.slice(-300), `${new Date().toLocaleTimeString()}  ${line}`]);

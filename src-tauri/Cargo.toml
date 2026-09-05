@@ -26,7 +26,17 @@ toml = "0.8"
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 wait-timeout = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
-zip = "2"
+# xz feature disabled: easytier's zip v4 pulls liblzma-sys, and cargo forbids
+# two native `lzma` providers in one build (xz2 vs liblzma-sys). Runtime
+# update archives are plain deflate/zips.
+zip = { version = "2", default-features = false, features = ["deflate", "time"] }
+dashmap = "6"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+url = "2"
+uuid = "1"
+# crates.io only publishes easytier up to 2.0.3; the bundled core is 2.6.4
+# (8428a89), so pull the crate from the project repo pinned to that tag.
+easytier = { git = "https://github.com/EasyTier/EasyTier", tag = "v2.6.4", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
