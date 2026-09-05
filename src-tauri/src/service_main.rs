@@ -2,7 +2,10 @@
 mod config_store;
 mod ipc;
 mod kernel_updater;
-mod remote_rpc;
+// NOTE: intentionally NOT compiling `remote_rpc` here — the service never
+// issues remote RPC calls, and skipping the easytier stack keeps this binary
+// (and its memory footprint) small.
+mod portal_args;
 mod runtime_manager;
 
 #[cfg(windows)]
@@ -86,6 +89,7 @@ mod windows_service {
         stopped: Arc<Mutex<bool>>,
         status_handle: &::windows_service::service_control_handler::ServiceStatusHandle,
     ) -> Result<(), String> {
+        let stopped_for_ipc = stopped.clone();
         let interactive_sid = args
             .iter()
             .filter_map(|arg| arg.to_str())
@@ -154,6 +158,7 @@ mod windows_service {
         let cache2 = cache.clone();
         let tasks2 = tasks.clone();
         let lock2 = update_lock.clone();
+        let stopped2 = stopped_for_ipc.clone();
         std::thread::spawn(move || {
             let _ = ipc::serve(
                 move |request| {
@@ -165,6 +170,7 @@ mod windows_service {
                         &cache2,
                         &tasks2,
                         &lock2,
+                        &stopped2,
                     )
                 },
                 &interactive_sid,
@@ -218,6 +224,7 @@ mod windows_service {
         cache: &ipc::IdempotencyCache,
         tasks: &Tasks,
         update_lock: &Arc<Mutex<bool>>,
+        stopped_opt: &Arc<Mutex<bool>>,
     ) -> ipc::Response {
         if req.protocol_version != ipc::PROTOCOL_VERSION {
             return ipc::error(&req, "invalid_request", "unsupported protocol version");
@@ -225,7 +232,7 @@ mod windows_service {
         if let Some(old) = cache.lock().unwrap().get(&req.request_id).cloned() {
             return old;
         }
-        let result = dispatch(&req, state, runtime, tasks, update_lock);
+        let result = dispatch(&req, state, runtime, tasks, update_lock, stopped_opt);
         let response = match result {
             Ok(v) => ipc::response(&req, v),
             Err((c, m)) => ipc::error(&req, c, m),
@@ -246,6 +253,7 @@ mod windows_service {
         runtime: &Arc<Mutex<runtime_manager::RuntimeManager>>,
         tasks: &Tasks,
         update_lock: &Arc<Mutex<bool>>,
+        stopped_opt: &Arc<Mutex<bool>>,
     ) -> Result<serde_json::Value, (&'static str, String)> {
         use config_store::DesiredState;
         let mut s = state.lock().unwrap();
@@ -365,6 +373,21 @@ mod windows_service {
                     }
                 }
                 Ok(serde_json::json!({"stopped": true}))
+            }
+            // GUI quit asks the resident service to shut itself down so the
+            // whole stack goes away with the client. The GUI auto-starts the
+            // service again on next launch.
+            "shutdown_service" => {
+                for c in s.instances.iter_mut() {
+                    if c.desired_state == DesiredState::Running
+                        || runtime.lock().unwrap().children.contains_key(&c.id)
+                    {
+                        c.desired_state = DesiredState::Stopped;
+                        let _ = runtime.lock().unwrap().stop(c);
+                    }
+                }
+                *stopped_opt.lock().unwrap() = true;
+                Ok(serde_json::json!({"shutdown": true}))
             }
             "set_auto_start" => {
                 let id = req

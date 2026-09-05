@@ -137,7 +137,7 @@ impl RuntimeManager {
         command
             .arg("--config-file")
             .arg(path)
-            .args(crate::remote_rpc::build_rpc_portal_args(
+            .args(crate::portal_args::build_rpc_portal_args(
                 cfg.remote_manage_enabled,
                 cfg.rpc_port,
                 &cfg.rpc_whitelist_cidrs,

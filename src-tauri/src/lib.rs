@@ -2,6 +2,7 @@
 mod config_store;
 mod ipc;
 mod kernel_updater;
+mod portal_args;
 mod remote_rpc;
 mod runtime_manager;
 use kernel_updater::KernelUpdateInfo;
@@ -688,7 +689,7 @@ fn install_service() -> Result<String, String> {
         let sid_dir = config_store::data_dir();
         let _ = std::fs::create_dir_all(&sid_dir);
         let _ = std::fs::write(sid_dir.join("interactive-user.sid"), &trusted_sid);
-        let command = format!("$ErrorActionPreference='Stop'; $p='{}'; $bin='\\\"'+$p+'\\\" --interactive-user-sid={}' ; & sc.exe stop EasyTierService 2>$null; & sc.exe create EasyTierService binPath= $bin start= auto DisplayName= 'EasyTier Service'; if ($LASTEXITCODE -ne 0) {{ & sc.exe config EasyTierService binPath= $bin start= auto; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }} }}; & sc.exe description EasyTierService 'EasyTier background service'; & sc.exe start EasyTierService; exit $LASTEXITCODE", service_path, trusted_sid);
+        let command = format!("$ErrorActionPreference='Stop'; $p='{}'; $bin='\\\"'+$p+'\\\" --interactive-user-sid={}' ; & sc.exe stop EasyTierService 2>$null; & sc.exe create EasyTierService binPath= $bin start= auto DisplayName= 'EasyTier Service'; if ($LASTEXITCODE -ne 0) {{ & sc.exe config EasyTierService binPath= $bin start= auto; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }} }}; & sc.exe description EasyTierService 'EasyTier background service'; & sc.exe start EasyTierService; $sd=(sc.exe sdshow EasyTierService | Select-String '^D:' | Select-Object -First 1).ToString().Trim(); if ($sd) {{ & sc.exe sdset EasyTierService ($sd + '(A;;RPWP;;;{})') | Out-Null }}; exit $LASTEXITCODE", service_path, trusted_sid, trusted_sid);
         let status = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &format!("Start-Process powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-Command','{}'", command.replace('\'', "''"))])
             .creation_flags(0x08000000)
@@ -709,6 +710,17 @@ fn install_service() -> Result<String, String> {
 fn start_service() -> Result<String, String> {
     #[cfg(windows)]
     {
+        // The installer grants the interactive user start/stop rights via
+        // sdset, so try the direct path first (no UAC flash).
+        let direct = Command::new("sc.exe")
+            .args(["start", "EasyTierService"])
+            .creation_flags(0x08000000)
+            .output();
+        if let Ok(output) = &direct {
+            if output.status.success() {
+                return Ok("后台服务已启动".into());
+            }
+        }
         let command = "Start-Service -Name EasyTierService";
         let status = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &format!("Start-Process powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-Command','{}'", command)]).creation_flags(0x08000000).status().map_err(|e| format!("service_start_failed: {e}"))?;
         if status.success() {
@@ -746,23 +758,56 @@ fn quit_and_stop_networks(app: &tauri::AppHandle) {
             let _ = std::fs::remove_file(std::env::temp_dir().join(format!("easytier-{}.toml", id)));
         }
     }
-    // Service mode: ask the service to stop all instances. Read the response
-    // before exiting; fire-and-forget writes race with app.exit.
+    // Service mode: stop every instance, then ask the resident service to
+    // shut itself down so the whole stack goes away with the client. Read
+    // each response before proceeding; fire-and-forget writes race with
+    // app.exit. An old service binary may not know the newer commands —
+    // fall back to per-instance stops in that case.
     #[cfg(windows)]
     {
-        let request = serde_json::json!({
-            "protocol_version": ipc::PROTOCOL_VERSION,
-            "request_id": uuid::Uuid::new_v4().to_string(),
-            "command": "stop_all_instances",
-            "payload": {},
-        });
-        if let Ok(bytes) = serde_json::to_vec(&request) {
-            if let Ok(mut pipe) = PipeClient::connect(r"\\.\pipe\EasyTierService") {
-                use std::io::{BufRead as _, Write as _};
-                let _ = pipe.write_all(&bytes).and_then(|_| pipe.write_all(b"\n"));
-                let _ = BufReader::new(pipe).read_until(b'\n', &mut Vec::new());
+        use std::io::{BufRead as _, Write as _};
+        let send = |command: &str| -> Option<Value> {
+            let request = serde_json::json!({
+                "protocol_version": ipc::PROTOCOL_VERSION,
+                "request_id": uuid::Uuid::new_v4().to_string(),
+                "command": command,
+                "payload": {},
+            });
+            let bytes = serde_json::to_vec(&request).ok()?;
+            let mut pipe = PipeClient::connect(r"\\.\pipe\EasyTierService").ok()?;
+            pipe.write_all(&bytes).and_then(|_| pipe.write_all(b"\n")).ok()?;
+            let mut line = Vec::new();
+            BufReader::new(pipe).read_until(b'\n', &mut line).ok()?;
+            serde_json::from_slice(&line).ok()
+        };
+        let stopped_ok = send("stop_all_instances")
+            .and_then(|r| r.get("ok").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+        if !stopped_ok {
+            // Old service without stop_all_instances: stop each known
+            // instance individually.
+            let instances = send("list_instances")
+                .and_then(|r| r.get("data").cloned())
+                .map(|data| serde_json::from_value::<Vec<serde_json::Value>>(data).unwrap_or_default())
+                .unwrap_or_default();
+            for inst in instances {
+                if let Some(id) = inst.get("id").and_then(|v| v.as_str()) {
+                    let request = serde_json::json!({
+                        "protocol_version": ipc::PROTOCOL_VERSION,
+                        "request_id": uuid::Uuid::new_v4().to_string(),
+                        "command": "stop_instance",
+                        "payload": { "instance_id": id },
+                    });
+                    if let Ok(bytes) = serde_json::to_vec(&request) {
+                        if let Ok(mut pipe) = PipeClient::connect(r"\\.\pipe\EasyTierService") {
+                            let _ = pipe.write_all(&bytes).and_then(|_| pipe.write_all(b"\n"));
+                            let _ = BufReader::new(pipe).read_until(b'\n', &mut Vec::new());
+                        }
+                    }
+                }
             }
         }
+        send("shutdown_service");
     }
     app.exit(0);
 }
