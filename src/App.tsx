@@ -7,6 +7,7 @@ import { ConfigEditor } from './ConfigEditor';
 import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, latencyTone, parseHumanBytes, parseNodeJSON, parsePeerJSON, parseRouteJSON, routeTone } from './status-data';
 import { RemoteConfigDialog, RemoteConfigEditor } from './RemoteConfigDialog';
 import { IconClipboard, IconCopy, IconDownload, IconGear, IconPlay, IconPlus, IconRefresh, IconRemote, IconSliders, IconStop, IconTerminal, IconTrash, IconUpload, IconUsers, IconGlobe } from './icons';
+import easytierLogo from './assets/easytier-logo.png';
 
 function RemoteConfigPanel({ host, running, peers, onPickPeer, localIp }: {
   host: string | null;
@@ -610,7 +611,7 @@ export default function App() {
         </div>
       )}
       <aside>
-        <div className="brand"><span className="brand-mark">E</span><div><strong>EasyTier</strong><small>Windows Client</small></div></div>
+        <div className="brand"><span className="brand-mark"><img src={easytierLogo} alt="EasyTier" draggable={false} /></span><div><strong>EasyTier</strong><small>Windows Client</small></div></div>
         <div className="section-label">网络实例</div>
         <nav>
           {instances.map(i => (
