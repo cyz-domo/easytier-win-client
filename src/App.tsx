@@ -145,6 +145,7 @@ export default function App() {
   const [kernelProxy, setKernelProxy] = useState<string>(() => load('easytier.kernel-update-proxy.v1', 'direct'));
   const [service, setService] = useState<ServiceStatus | null>(null);
   const [serviceBusy, setServiceBusy] = useState(false);
+  const [serviceResult, setServiceResult] = useState<{ ok: boolean; text: string } | null>(null);
   const serviceMode = service?.running === true && service?.healthy !== false;
   const serviceInstalled = service?.installed === true;
   const logTimer = useRef<number | null>(null);
@@ -159,7 +160,7 @@ export default function App() {
   useEffect(() => { localStorage.setItem('easytier.instances.v2', JSON.stringify(instances)); }, [instances]);
   useEffect(() => { if (current) localStorage.setItem('easytier.active.v2', current.id); }, [current]);
   useEffect(() => { invoke<runtimeInfo>('detect_runtime', {}).then(v => setRuntime({ ...v, core_path: v.core_path ?? 'core/easytier-core.exe' })).catch(() => setRuntime(null)); }, []);
-  const refreshService = async () => {
+  const refreshService = async (opts?: { skipAutoStart?: boolean }) => {
     try {
       const installed = await invoke<{ installed: boolean; running: boolean; message?: string }>('query_service_installation');
       if (!installed.installed) {
@@ -167,15 +168,20 @@ export default function App() {
         return;
       }
       if (!installed.running) {
-        // Auto-start an installed-but-stopped service so the user does not
-        // have to visit settings after a reboot or manual service stop.
-        try {
-          await invoke('start_service');
-          await new Promise(r => setTimeout(r, 800));
-        } catch {
-          setService({ installed: true, running: false, message: '服务已安装但尚未运行。' });
-          return;
+        setService({ installed: true, running: false, message: '正在启动后台服务…' });
+        // Auto-start in the background so the UI never waits on UAC/SCM.
+        if (!opts?.skipAutoStart) {
+          void (async () => {
+            try {
+              await invoke('start_service');
+              await new Promise(r => setTimeout(r, 600));
+              await refreshService({ skipAutoStart: true });
+            } catch {
+              setService({ installed: true, running: false, message: '服务已安装但启动失败（可在设置中重试）。' });
+            }
+          })();
         }
+        return;
       }
       const next = await getServiceStatus();
       setService({ ...next, installed: true, running: true });
@@ -849,10 +855,11 @@ export default function App() {
             <div className="card service-card">
               <div className="card-title-row"><h3 className="card-title">后台服务</h3><span className={serviceMode ? 'service-state online' : 'service-state'}>{serviceMode ? '服务模式' : '兼容模式'}</span></div>
               <p className="hint">{service?.message || (service?.installed ? (service?.running ? '服务正在运行。' : '服务已安装但尚未运行。') : '未检测到 EasyTierService。')}</p>
+              {serviceResult && <p className={serviceResult.ok ? 'hint' : 'list-empty err'} style={{ marginTop: 6 }}>{serviceResult.ok ? '✓ ' : '✗ '}{serviceResult.text}</p>}
               <div className="service-actions">
-                {!service?.installed && <button className="primary" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await invoke('install_service'); await refreshService(); } catch (e) { alert(`安装服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>安装后台服务</button>}
+                {!service?.installed && <button className="primary" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); setServiceResult(null); try { await invoke('install_service'); setServiceResult({ ok: true, text: '后台服务已安装并启动。' }); await refreshService({ skipAutoStart: true }); } catch (e) { setServiceResult({ ok: false, text: `安装服务失败：${String(e)}` }); } finally { setServiceBusy(false); } }}>{serviceBusy ? '正在安装…' : '安装后台服务'}</button>}
                 {service?.installed && !service?.running && <button className="primary" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await invoke('start_service'); await refreshService(); } catch (e) { alert(`启动服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>启动服务</button>}
-                {service?.installed && <button className="ghost" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await invoke('repair_service'); await refreshService(); } catch (e) { alert(`修复服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>修复服务</button>}
+                {service?.installed && <button className="ghost" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); setServiceResult(null); try { await invoke('repair_service'); setServiceResult({ ok: true, text: '后台服务已修复并启动。' }); await refreshService(); } catch (e) { setServiceResult({ ok: false, text: `修复服务失败：${String(e)}` }); } finally { setServiceBusy(false); } }}>修复服务</button>}
               </div>
             </div>
             <div className="card">

@@ -161,13 +161,15 @@ impl RuntimeManager {
         }
         self.errors.remove(&cfg.id);
         self.children.insert(cfg.id.clone(), child);
-        for _ in 0..20 {
-            if std::net::TcpStream::connect(("127.0.0.1", cfg.rpc_port)).is_ok() {
-                return Ok(self.snapshot(cfg));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
+        // No readiness wait here: holding the runtime lock for seconds while
+        // probing blocked every other IPC request (logs, snapshots, other
+        // instances). Callers probe with portal_ready() on their own schedule.
         Ok(self.snapshot(cfg))
+    }
+
+    /// Non-blocking readiness probe for an instance's RPC portal.
+    pub fn portal_ready(&self, cfg: &InstanceConfig) -> bool {
+        std::net::TcpStream::connect(("127.0.0.1", cfg.rpc_port)).is_ok()
     }
     pub fn stop(&mut self, cfg: &InstanceConfig) -> Result<InstanceSnapshot, String> {
         if let Some(mut child) = self.children.remove(&cfg.id) {

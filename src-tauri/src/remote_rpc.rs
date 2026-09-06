@@ -346,12 +346,25 @@ pub async fn local_status_query(port: u16) -> Result<Value, String> {
                 .scoped_client::<PeerManageRpcClientFactory<BaseController>>("".to_string())
                 .await
                 .map_err(|e| format!("connect failed: {e:#}"))?;
-            let node_info = node_stub
+            // While the core is starting (or has no instance registered yet)
+            // the portal answers but rejects instance-scoped calls. Treat that
+            // window as "pending" instead of an error so the UI keeps polling.
+            let node_info = match node_stub
                 .show_node_info(ctrl.clone(), ShowNodeInfoRequest { instance: None })
                 .await
-                .map_err(|e| format!("show_node_info failed: {e:#}"))?
-                .node_info
-                .ok_or_else(|| "node info unavailable".to_string())?;
+            {
+                Ok(resp) => resp.node_info,
+                Err(e) => {
+                    let raw = format!("{e:#}");
+                    if raw.contains("Instance not found")
+                        || raw.contains("API service not available")
+                        || raw.contains("No instance matches")
+                    {
+                        return Ok((None, Vec::new(), Vec::new())); // instance pending
+                    }
+                    return Err(format!("show_node_info failed: {raw}"));
+                }
+            };
 
             let peer_stub = client
                 .scoped_client::<PeerManageRpcClientFactory<BaseController>>("".to_string())
@@ -379,7 +392,13 @@ pub async fn local_status_query(port: u16) -> Result<Value, String> {
     .await;
 
     let (node_info, peers, routes) = match result {
-        Ok(v) => v,
+        Ok((None, _, _)) => {
+            // Core is up but the instance is not registered yet.
+            return Ok(serde_json::json!({
+                "peers": [], "routes": [], "node": null, "pending": true,
+            }));
+        }
+        Ok((Some(node_info), peers, routes)) => (node_info, peers, routes),
         Err(e) => {
             if matches!(e, RpcError::Unavailable(_) | RpcError::Timeout(_)) {
                 if let Ok(mut clients) = RPC_CLIENTS.lock() {

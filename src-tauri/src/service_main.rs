@@ -353,6 +353,14 @@ mod windows_service {
                         .unwrap()
                         .start(c)
                         .map_err(|e| ("core_not_found", e))?;
+                    // Brief readiness probe; the lock is released between
+                    // probes so other IPC requests are not blocked.
+                    for _ in 0..8 {
+                        if runtime.lock().unwrap().portal_ready(c) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
                 } else {
                     c.desired_state = DesiredState::Stopped;
                     runtime
@@ -645,6 +653,13 @@ mod windows_service {
         for config in &running {
             if let Err(error) = runtime.lock().unwrap().start(config) {
                 failures.push(format!("{}: {}", config.id, error));
+            } else {
+                for _ in 0..8 {
+                    if runtime.lock().unwrap().portal_ready(config) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
             }
         }
         let result =
