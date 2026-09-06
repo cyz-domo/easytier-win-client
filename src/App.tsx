@@ -123,7 +123,7 @@ export default function App() {
   const [peers, setPeers] = useState<PeerInfo[]>([]);
   const [routes, setRoutes] = useState<RouteInfo[]>([]);
   const [node, setNode] = useState<NodeStatus | null>(null);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [logsByInstance, setLogsByInstance] = useState<Record<string, string[]>>({});
   const [networkLogs, setNetworkLogs] = useState<string[]>([]);
   const [logView, setLogView] = useState<'runtime' | 'network'>('runtime');
   const [isElevated, setIsElevated] = useState<boolean | null>(null);
@@ -307,7 +307,10 @@ export default function App() {
   }, []);
 
   // Append runtime messages to the log pane.
-  const addLog = (line: string) => setLogs(xs => [...xs.slice(-300), `${new Date().toLocaleTimeString()}  ${line}`]);
+  const addLog = (line: string) => setLogsByInstance(m => {
+    const key = current?.id ?? 'app';
+    return { ...m, [key]: [...(m[key] ?? []).slice(-300), `${new Date().toLocaleTimeString()}  ${line}`] };
+  });
   useEffect(() => { if (statusError) addLog(`状态查询失败：${statusError}`); }, [statusError]);
 
   const patchConfig = (patch: Partial<NetworkConfig>) => {
@@ -833,10 +836,10 @@ export default function App() {
                 <button className={logView === 'runtime' ? 'seg active' : 'seg'} onClick={() => setLogView('runtime')}>运行日志</button>
                 <button className={logView === 'network' ? 'seg active' : 'seg'} onClick={() => setLogView('network')}>组网日志</button>
               </div>
-              <button className="ghost" onClick={() => logView === 'runtime' ? setLogs([]) : clearNetworkLogs()}>清空</button>
+              <button className="ghost" onClick={() => logView === 'runtime' ? setLogsByInstance(m => ({ ...m, [current.id]: [] })) : clearNetworkLogs()}>清空</button>
             </div>
             <div className="log-pane" ref={el => { if (el && logTimer.current == null) el.scrollTop = el.scrollHeight; }}>
-              {(logView === 'runtime' ? logs : networkLogs).length === 0 ? <p className="list-empty">暂无{logView === 'runtime' ? '运行' : '组网'}日志</p> : (logView === 'runtime' ? logs : networkLogs).map((l, i) => <div className="log-line" key={i}>{l}</div>)}
+              {(logView === 'runtime' ? logsByInstance[current.id] ?? [] : networkLogs).length === 0 ? <p className="list-empty">暂无{logView === 'runtime' ? '运行' : '组网'}日志</p> : (logView === 'runtime' ? logsByInstance[current.id] ?? [] : networkLogs).map((l, i) => <div className="log-line" key={i}>{l}</div>)}
             </div>
           </div>
         )}
