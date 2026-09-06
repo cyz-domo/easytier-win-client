@@ -282,6 +282,28 @@ export default function App() {
     return () => { alive = false; if (timer != null) window.clearTimeout(timer); };
   }, [current?.id, current?.status, serviceMode, refreshSecs]);
 
+  // A core restart resets the per-connection traffic counters — clear the
+  // accumulated totals for that instance so the ledger restarts with it.
+  const prevStatuses = useRef<Record<string, string>>({});
+  useEffect(() => {
+    for (const i of instances) {
+      const prev = prevStatuses.current[i.id];
+      if (prev === 'running' && i.status !== 'running') {
+        setTrafficTotals(m => {
+          const next: Record<string, { rx: number; tx: number }> = {};
+          for (const [k, v] of Object.entries(m)) {
+            if (!k.startsWith(`${i.id}:`)) next[k] = v;
+          }
+          localStorage.setItem('easytier.traffic.v1', JSON.stringify(next));
+          return next;
+        });
+        for (const k of Object.keys(lastPeerCounters.current)) {
+          if (k.startsWith(`${i.id}:`)) delete lastPeerCounters.current[k];
+        }
+      }
+      prevStatuses.current[i.id] = i.status;
+    }
+  }, [instances]);
   useEffect(() => { localStorage.setItem('easytier.refresh.v1', JSON.stringify(refreshSecs)); }, [refreshSecs]);
   useEffect(() => { localStorage.setItem('easytier.show-peer-nodes.v1', JSON.stringify(showPeerNodes)); }, [showPeerNodes]);
   useEffect(() => { localStorage.setItem('easytier.kernel-update-proxy.v1', JSON.stringify(kernelProxy)); }, [kernelProxy]);

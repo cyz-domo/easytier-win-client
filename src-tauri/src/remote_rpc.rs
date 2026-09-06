@@ -524,6 +524,30 @@ pub async fn discover_remote_instance(host: &str, port: u16, virtual_ip: &str) -
     let result = call_with_endpoint(&endpoint, &format!("rpc-{host}-{port}"), "discover", |client| {
         let ip = ip.clone();
         Box::pin(async move {
+            // Check the remote's own identity first: when the target IP is the
+            // remote node itself, it never appears in its own peer list.
+            let node_stub = client
+                .scoped_client::<PeerManageRpcClientFactory<BaseController>>("".to_string())
+                .await
+                .map_err(|e| format!("connect failed: {e:#}"))?;
+            let node_info = node_stub
+                .show_node_info(rpc_controller(), ShowNodeInfoRequest { instance: None })
+                .await
+                .map_err(|e| format!("show_node_info failed: {e:#}"))?
+                .node_info
+                .ok_or_else(|| "node info unavailable".to_string())?;
+            let node_ip = node_info.ipv4_addr.split('/').next().unwrap_or_default().to_string();
+            if node_ip == ip {
+                if node_info.inst_id.is_empty() {
+                    return Err("该节点未上报实例 ID（可能版本过旧或未开启配置管理）".to_string());
+                }
+                return Ok(RemoteInstanceInfo {
+                    instance_id: node_info.inst_id.clone(),
+                    hostname: node_info.hostname.clone(),
+                    virtual_ip: ip,
+                });
+            }
+
             let peers = tokio::time::timeout(CALL_TIMEOUT, async {
                 client
                     .scoped_client::<PeerManageRpcClientFactory<BaseController>>("".to_string())
