@@ -5,16 +5,18 @@ import { defaultConfig, listenersForInstance, NetworkConfig, validateConfig } fr
 import { decodeTOML, encodeTOML } from './toml-codec';
 import { ConfigEditor } from './ConfigEditor';
 import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, latencyTone, parseHumanBytes, parseNodeJSON, parsePeerJSON, parseRouteJSON, routeTone } from './status-data';
-import { RemoteConfigDialog, RemoteConfigEditor } from './RemoteConfigDialog';
+import { RemoteConfigEditor } from './RemoteConfigDialog';
 import { IconClipboard, IconCopy, IconDownload, IconGear, IconPlay, IconPlus, IconRefresh, IconRemote, IconSliders, IconStop, IconTerminal, IconTrash, IconUpload, IconUsers, IconGlobe } from './icons';
 import easytierLogo from './assets/easytier-logo.png';
 
-function RemoteConfigPanel({ host, running, peers, onPickPeer, localIp }: {
+function RemoteConfigPanel({ host, port, running, peers, onPickPeer, localIp, onPortChange }: {
   host: string | null;
+  port: number;
   running: boolean;
   peers: PeerInfo[];
   onPickPeer: (ip: string) => void;
   localIp?: string;
+  onPortChange: (port: number) => void;
 }) {
   if (!running) return <div className="card"><p className="list-empty">网络未运行。启动网络后才能访问远端节点的 RPC。</p></div>;
   return (
@@ -35,7 +37,7 @@ function RemoteConfigPanel({ host, running, peers, onPickPeer, localIp }: {
           })}
         </div>
       </div>
-      {host && <div className="card"><h3 className="card-title">远程配置 — {host}</h3><RemoteConfigEditor key={host} host={host} /></div>}
+      {host && <div className="card"><h3 className="card-title">远程配置 — {host}</h3><RemoteConfigEditor key={`${host}:${port}`} host={host} port={port} /></div>}
     </>
   );
 }
@@ -118,7 +120,21 @@ export default function App() {
   const [activeId, setActiveId] = useState<string>(() => load('easytier.active.v2', ''));
   const [tab, setTab] = useState<Tab>('status');
   const [pollEpoch, setPollEpoch] = useState(0);
-  const [remoteTabHost, setRemoteTabHost] = useState<string | null>(null);
+  const [remoteTarget, setRemoteTarget] = useState<{ host: string; port: number } | null>(null);
+  // Resolve the RPC port for a target: a peer that is actually one of this
+  // machine's own instances uses that instance's rpcPort (multi-instance
+  // hosts bind several portals); everything else defaults to 15888.
+  const resolvePortFor = (ip: string): number => {
+    for (const [id, s] of Object.entries(statusByInstance)) {
+      const nip = s.node?.ipv4_addr?.split('/')[0];
+      if (nip && nip === ip) return instances.find(i => i.id === id)?.rpcPort ?? 15888;
+    }
+    for (const i of instances) {
+      const vip = i.config.virtual_ipv4?.split('/')[0];
+      if (vip && vip === ip) return i.rpcPort;
+    }
+    return 15888;
+  };
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [runtime, setRuntime] = useState<runtimeInfo | null>(null);
   interface InstanceSnapshot { peers: PeerInfo[]; routes: RouteInfo[]; node: NodeStatus | null }
@@ -139,7 +155,6 @@ export default function App() {
   const [refreshSecs, setRefreshSecs] = useState<RefreshInterval>(() => load('easytier.refresh.v1', 5));
   const [showDisplaySettings, setShowDisplaySettings] = useState(false);
   const [showPeerNodes, setShowPeerNodes] = useState<boolean>(() => load('easytier.show-peer-nodes.v1', false));
-  const [remoteEditHost, setRemoteEditHost] = useState<string | null>(null);
   const [tomlDraft, setTomlDraft] = useState<string | null>(null);
   const [tomlDirty, setTomlDirty] = useState(false);
   const [tomlError, setTomlError] = useState<string | null>(null);
@@ -799,7 +814,7 @@ export default function App() {
                     const remoteIp = p.ipv4 || route?.ipv4?.split('/')[0];
                     const openRemote = () => {
                       if (isLocal || !remoteIp) return;
-                      setRemoteTabHost(remoteIp);
+                      setRemoteTarget({ host: remoteIp, port: resolvePortFor(remoteIp) });
                       setTab('remote');
                     };
                     return (
@@ -892,7 +907,7 @@ export default function App() {
         )}
 
         {tab === 'remote' && (
-          <RemoteConfigPanel host={remoteTabHost} running={running} localIp={node?.ipv4_addr?.split('/')[0]} onPickPeer={(ip) => setRemoteTabHost(ip)} peers={visiblePeers.filter(p => {
+          <RemoteConfigPanel host={remoteTarget?.host ?? null} port={remoteTarget?.port ?? 15888} running={running} localIp={node?.ipv4_addr?.split('/')[0]} onPickPeer={(ip) => setRemoteTarget({ host: ip, port: resolvePortFor(ip) })} onPortChange={(p) => setRemoteTarget(t => (t ? { ...t, port: p } : t))} peers={visiblePeers.filter(p => {
             const ip = p.ipv4 || routes.find(r => r.hostname === p.hostname)?.ipv4?.split('/')[0];
             if (!ip) return false;
             if (p.cost === 'Local') return false;
@@ -1009,7 +1024,6 @@ export default function App() {
           </>
         )}
       </section>
-      {remoteEditHost && <RemoteConfigDialog host={remoteEditHost} onClose={() => setRemoteEditHost(null)} />}
     </main>
   );
 }

@@ -9,6 +9,8 @@ interface RemoteInstanceInfo {
 
 interface RemoteConfigEditorProps {
   host: string;
+  /** Target instance's RPC portal port (multi-instance hosts use several). */
+  port: number;
   /** Unique per mount: state resets when the key changes. */
   onClose?: () => void;
 }
@@ -51,7 +53,7 @@ function toEditState(config: Record<string, unknown>): EditState {
  * config, tracks unsaved edits, and patches only the fields the remote
  * patch_config protocol supports.
  */
-export function RemoteConfigEditor({ host, onClose }: RemoteConfigEditorProps) {
+export function RemoteConfigEditor({ host, port, onClose }: RemoteConfigEditorProps) {
   const [phase, setPhase] = useState<Phase>('discover');
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<RemoteInstanceInfo | null>(null);
@@ -63,10 +65,10 @@ export function RemoteConfigEditor({ host, onClose }: RemoteConfigEditorProps) {
     setError(null);
     setPhase('discover');
     try {
-      const disc = await invoke<RemoteInstanceInfo>('remote_config_discover', { host, port: 15888, virtualIp: host });
+      const disc = await invoke<RemoteInstanceInfo>('remote_config_discover', { host, port, virtualIp: host });
       setInfo(disc);
       setPhase('load');
-      const cfg = await invoke<Record<string, unknown>>('remote_config_load', { host, port: 15888, instanceId: disc.instance_id });
+      const cfg = await invoke<Record<string, unknown>>('remote_config_load', { host, port, instanceId: disc.instance_id });
       const config = (cfg.config ?? cfg) as Record<string, unknown>;
       const state = toEditState(config);
       setEdit(state);
@@ -76,7 +78,7 @@ export function RemoteConfigEditor({ host, onClose }: RemoteConfigEditorProps) {
       setError(String(e));
       setPhase(p => (p === 'discover' ? 'discover' : 'load'));
     }
-  }, [host]);
+  }, [host, port]);
 
   useEffect(() => { void discoverAndLoad(); }, [discoverAndLoad, reloadKey]);
 
@@ -102,7 +104,7 @@ export function RemoteConfigEditor({ host, onClose }: RemoteConfigEditorProps) {
       if (JSON.stringify(edit.proxyCidrs) !== JSON.stringify(snapshot?.proxyCidrs)) patch.proxy_networks = edit.proxyCidrs;
       if (JSON.stringify(edit.exitNodes) !== JSON.stringify(snapshot?.exitNodes)) patch.exit_nodes = edit.exitNodes;
       if (Object.keys(patch).length === 0) { setPhase('ready'); return; }
-      await invoke('remote_config_patch', { host, port: 15888, instanceId: info.instance_id, patch });
+      await invoke('remote_config_patch', { host, port, instanceId: info.instance_id, patch });
       setSnapshot(edit);
       setPhase('saved');
       setTimeout(() => setPhase(p => (p === 'saved' ? 'ready' : p)), 1600);
@@ -194,11 +196,12 @@ export function RemoteConfigEditor({ host, onClose }: RemoteConfigEditorProps) {
 
 interface RemoteConfigDialogProps {
   host: string;
+  port: number;
   onClose: () => void;
 }
 
 /** Overlay wrapper around RemoteConfigEditor. */
-export function RemoteConfigDialog({ host, onClose }: RemoteConfigDialogProps) {
+export function RemoteConfigDialog({ host, port, onClose }: RemoteConfigDialogProps) {
   return (
     <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="远程配置">
       <div className="modal-card">
@@ -206,7 +209,7 @@ export function RemoteConfigDialog({ host, onClose }: RemoteConfigDialogProps) {
           <h3 className="card-title">远程配置 — {host}</h3>
           <button type="button" className="ghost" onClick={onClose}>关闭</button>
         </div>
-        <RemoteConfigEditor host={host} onClose={onClose} />
+        <RemoteConfigEditor host={host} port={port} onClose={onClose} />
       </div>
     </div>
   );
