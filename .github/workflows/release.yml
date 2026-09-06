@@ -63,6 +63,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install protoc
+        run: choco install protoc -y
+
       - name: Test frontend codec
         run: npm run test:codec
 
