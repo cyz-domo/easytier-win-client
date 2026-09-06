@@ -123,6 +123,11 @@ export default function App() {
   const [runtime, setRuntime] = useState<runtimeInfo | null>(null);
   interface InstanceSnapshot { peers: PeerInfo[]; routes: RouteInfo[]; node: NodeStatus | null }
   const [statusByInstance, setStatusByInstance] = useState<Record<string, InstanceSnapshot>>({});
+  // Cumulative per-peer traffic. The core's rx/tx counters are per-connection
+  // and reset when a peer reconnects, which silently erased transferred data;
+  // deltas accumulated here survive reconnects (and app restarts).
+  const [trafficTotals, setTrafficTotals] = useState<Record<string, { rx: number; tx: number }>>(() => load('easytier.traffic.v1', {}));
+  const lastPeerCounters = useRef<Record<string, { rx: number; tx: number }>>({});
   const [logsByInstance, setLogsByInstance] = useState<Record<string, string[]>>({});
   const [networkLogs, setNetworkLogs] = useState<string[]>([]);
   const [logView, setLogView] = useState<'runtime' | 'network'>('runtime');
@@ -156,6 +161,26 @@ export default function App() {
   const peers = curSnap.peers;
   const routes = curSnap.routes;
   const node = curSnap.node;
+  // Accumulated traffic (survives peer reconnects and app restarts).
+  const trafficPrefix = `${current?.id ?? ''}:`;
+  const instanceTraffic = useMemo(() => {
+    let rx = 0, tx = 0;
+    for (const [key, v] of Object.entries(trafficTotals)) {
+      if (key.startsWith(trafficPrefix)) { rx += v.rx; tx += v.tx; }
+    }
+    return { rx, tx };
+  }, [trafficTotals, trafficPrefix]);
+  const clearTraffic = () => {
+    setTrafficTotals(m => {
+      const nextM: Record<string, { rx: number; tx: number }> = {};
+      for (const [key, v] of Object.entries(m)) {
+        if (!key.startsWith(trafficPrefix)) nextM[key] = v;
+      }
+      localStorage.setItem('easytier.traffic.v1', JSON.stringify(nextM));
+      return nextM;
+    });
+    lastPeerCounters.current = {};
+  };
   const visiblePeers = useMemo(() => {
     if (showPeerNodes || !current) return peers;
     return peers.filter(peer => !String(peer.hostname ?? '').toLowerCase().startsWith('publicserver'));
@@ -319,6 +344,28 @@ export default function App() {
         }
         return next;
       });
+      // Accumulate per-peer traffic deltas (reset-aware).
+      for (const [id, snapshot] of results) {
+        if (!snapshot) continue;
+        for (const p of snapshot.peers) {
+          if (p.cost === 'Local') continue;
+          const key = `${id}:${p.hostname}:${p.ipv4 ?? ''}`;
+          const rx = parseHumanBytes(p.rx_bytes);
+          const tx = parseHumanBytes(p.tx_bytes);
+          const last = lastPeerCounters.current[key];
+          lastPeerCounters.current[key] = { rx, tx };
+          if (!last) continue; // first sighting: history unknown, start from here
+          const drx = rx >= last.rx ? rx - last.rx : rx; // counter reset → treat as fresh
+          const dtx = tx >= last.tx ? tx - last.tx : tx;
+          if (drx === 0 && dtx === 0) continue;
+          setTrafficTotals(m => {
+            const cur = m[key] ?? { rx: 0, tx: 0 };
+            const nextM = { ...m, [key]: { rx: cur.rx + drx, tx: cur.tx + dtx } };
+            localStorage.setItem('easytier.traffic.v1', JSON.stringify(nextM));
+            return nextM;
+          });
+        }
+      }
       timer = window.setTimeout(() => void refresh(), refreshSecs * 1000);
     };
     void refresh();
@@ -668,7 +715,7 @@ export default function App() {
             <div className="metrics">
               <article><span>组网成员</span><strong>{running ? peers.length : '—'}</strong><small>{running ? '在线节点' : '未运行'}</small></article>
               <article><span>路由条目</span><strong>{running ? routes.length : '—'}</strong><small>{running ? '已知网段' : '未运行'}</small></article>
-              <article><span>收发总量</span><strong>{running ? formatBytes(peers.reduce((s, p) => s + parseHumanBytes(p.rx_bytes) + parseHumanBytes(p.tx_bytes), 0)) : '—'}</strong><small>所有成员合计</small></article>
+              <article><span>累计收发<button type="button" className="mini-button" style={{ marginLeft: 8, padding: '2px 8px', fontSize: 10 }} onClick={clearTraffic} title="清零累计统计">清零</button></span><strong>{running ? formatBytes(instanceTraffic.rx + instanceTraffic.tx) : '—'}</strong><small>累计值（重连不丢失）</small></article>
             </div>
             <div className="section-heading"><div><h2>快速操作</h2><p>常用配置与信息入口</p></div></div>
             <div className="config-grid">
