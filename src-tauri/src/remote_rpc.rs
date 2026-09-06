@@ -27,7 +27,7 @@ use easytier::proto::{
         config::{ConfigRpc, ConfigRpcClientFactory, GetConfigRequest, PatchConfigRequest},
         instance::{
             InstanceIdentifier, ListPeerRequest, ListRouteRequest, PeerManageRpc,
-            PeerManageRpcClientFactory,
+            PeerManageRpcClientFactory, ShowNodeInfoRequest,
         },
     },
     rpc_impl::standalone::StandAloneClient,
@@ -218,6 +218,243 @@ fn rpc_controller() -> BaseController {
 /// whitelist rejecting a non-loopback source (default allowlist is loopback
 /// only). Translate the raw timeout into an actionable hint.
 pub use crate::portal_args::build_rpc_portal_args;
+
+// ---------------------------------------------------------------------------
+// Local status queries (peer/route/node) over a persistent RPC connection.
+// Replaces spawning three easytier-cli processes per status refresh: the
+// endpoint pool keeps one TCP connection per instance and answers in
+// milliseconds instead of ~100ms+ of process-creation overhead per call.
+// Output JSON mirrors easytier-cli's `peer`/`route`/`node` shapes so the
+// frontend parsing stays unchanged.
+// ---------------------------------------------------------------------------
+
+fn cost_to_str(cost: i32) -> String {
+    if cost == 1 {
+        "p2p".to_string()
+    } else {
+        format!("relay({cost})")
+    }
+}
+
+/// Mirror humansize::DECIMAL ("1.83 kB") used by easytier-cli.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 7] = ["B", "kB", "MB", "GB", "TB", "PB", "EB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    format!("{value:.2} {}", UNITS[unit])
+}
+
+fn pair_latency(p: &easytier::proto::api::instance::PeerRoutePair) -> Option<f64> {
+    p.get_latency_ms()
+}
+
+fn peer_item(
+    p: &easytier::proto::api::instance::PeerRoutePair,
+) -> serde_json::Value {
+    let route = p.route.clone().unwrap_or_default();
+    let lat_ms = if route.cost == 1 {
+        p.get_latency_ms().unwrap_or(0.0)
+    } else {
+        route.path_latency_latency_first() as f64
+    };
+    serde_json::json!({
+        "cidr": route.ipv4_addr.as_ref().map(|ip| ip.to_string()).unwrap_or_default(),
+        "ipv4": route.ipv4_addr.as_ref().and_then(|ip| ip.address.as_ref()).map(|a| std::net::Ipv4Addr::from(a.addr).to_string()).unwrap_or_default(),
+        "hostname": route.hostname,
+        "cost": cost_to_str(route.cost),
+        "lat_ms": format!("{lat_ms:.2}"),
+        "loss_rate": format!("{:.1}%", p.get_loss_rate().unwrap_or(0.0) * 100.0),
+        "rx_bytes": human_size(p.get_rx_bytes().unwrap_or(0)),
+        "tx_bytes": human_size(p.get_tx_bytes().unwrap_or(0)),
+        "tunnel_proto": p.get_conn_protos().unwrap_or_default().join(","),
+        "nat_type": p.get_udp_nat_type(),
+        "id": route.peer_id.to_string(),
+        "version": if route.version.is_empty() { "unknown".to_string() } else { route.version },
+    })
+}
+
+fn route_item(
+    p: &easytier::proto::api::instance::PeerRoutePair,
+    peer_routes: &[easytier::proto::api::instance::PeerRoutePair],
+    local: &easytier::proto::api::instance::NodeInfo,
+) -> serde_json::Value {
+    let route = p.route.clone().unwrap_or_default();
+    let find_pair = |peer_id: u32| {
+        peer_routes
+            .iter()
+            .find(|pair| pair.route.clone().unwrap_or_default().peer_id == peer_id)
+    };
+    let next_hop_pair = find_pair(route.next_hop_peer_id);
+    let next_hop_lat_first = find_pair(route.next_hop_peer_id_latency_first.unwrap_or_default());
+
+    let nh_ipv4 = |pair: Option<&easytier::proto::api::instance::PeerRoutePair>, direct: bool| -> String {
+        if direct {
+            "DIRECT".to_string()
+        } else {
+            pair.and_then(|x| x.route.as_ref())
+                .and_then(|r| r.ipv4_addr.as_ref())
+                .map(|ip| ip.to_string())
+                .unwrap_or_default()
+        }
+    };
+    let nh_host = |pair: Option<&easytier::proto::api::instance::PeerRoutePair>, direct: bool| -> String {
+        if direct {
+            "DIRECT".to_string()
+        } else {
+            pair.and_then(|x| x.route.as_ref()).map(|r| r.hostname.clone()).unwrap_or_default()
+        }
+    };
+
+    serde_json::json!({
+        "ipv4": route.ipv4_addr.as_ref().map(|ip| ip.to_string()).unwrap_or_default(),
+        "hostname": route.hostname,
+        "proxy_cidrs": route.proxy_cidrs.join(","),
+        "next_hop_ipv4": nh_ipv4(next_hop_pair, route.cost == 1),
+        "next_hop_hostname": nh_host(next_hop_pair, route.cost == 1),
+        "next_hop_lat": next_hop_pair.map(|x| x.get_latency_ms().unwrap_or(0.0)).unwrap_or(0.0),
+        "path_len": route.cost,
+        "path_latency": route.path_latency,
+        "next_hop_ipv4_lat_first": nh_ipv4(next_hop_lat_first, route.cost_latency_first.unwrap_or_default() == 1),
+        "next_hop_hostname_lat_first": nh_host(next_hop_lat_first, route.cost_latency_first.unwrap_or_default() == 1),
+        "path_len_lat_first": route.cost_latency_first.unwrap_or_default(),
+        "path_latency_lat_first": route.path_latency_latency_first,
+        "version": route.version,
+        "_local": false,
+        // local-node row (mirrors CLI's first RouteTableItem)
+        "local_ipv4": local.ipv4_addr,
+        "local_hostname": local.hostname,
+        "local_proxy_cidrs": local.proxy_cidrs.join(", "),
+        "local_version": local.version,
+    })
+}
+
+/// Query one local instance's peer/route/node state over the persistent
+/// connection and return CLI-compatible JSON.
+pub async fn local_status_query(port: u16) -> Result<Value, String> {
+    let endpoint = endpoint_for("127.0.0.1", port).map_err(|e| e.to_string())?;
+    let result = call_with_endpoint(&endpoint, &format!("rpc-127.0.0.1-{port}"), "status", |client| {
+        Box::pin(async move {
+            let ctrl = rpc_controller();
+            let node_stub = client
+                .scoped_client::<PeerManageRpcClientFactory<BaseController>>("".to_string())
+                .await
+                .map_err(|e| format!("connect failed: {e:#}"))?;
+            let node_info = node_stub
+                .show_node_info(ctrl.clone(), ShowNodeInfoRequest { instance: None })
+                .await
+                .map_err(|e| format!("show_node_info failed: {e:#}"))?
+                .node_info
+                .ok_or_else(|| "node info unavailable".to_string())?;
+
+            let peer_stub = client
+                .scoped_client::<PeerManageRpcClientFactory<BaseController>>("".to_string())
+                .await
+                .map_err(|e| format!("connect failed: {e:#}"))?;
+            let peers = peer_stub
+                .list_peer(ctrl.clone(), ListPeerRequest { instance: None })
+                .await
+                .map_err(|e| format!("list_peer failed: {e:#}"))?
+                .peer_infos;
+
+            let route_stub = client
+                .scoped_client::<PeerManageRpcClientFactory<BaseController>>("".to_string())
+                .await
+                .map_err(|e| format!("connect failed: {e:#}"))?;
+            let routes = route_stub
+                .list_route(ctrl, ListRouteRequest { instance: None })
+                .await
+                .map_err(|e| format!("list_route failed: {e:#}"))?
+                .routes;
+
+            Ok((node_info, peers, routes))
+        })
+    })
+    .await;
+
+    let (node_info, peers, routes) = match result {
+        Ok(v) => v,
+        Err(e) => {
+            if matches!(e, RpcError::Unavailable(_) | RpcError::Timeout(_)) {
+                if let Ok(mut clients) = RPC_CLIENTS.lock() {
+                    clients.remove(&format!("rpc-127.0.0.1-{port}"));
+                }
+            }
+            return Err(e.to_string());
+        }
+    };
+
+    let pairs = easytier::proto::api::instance::list_peer_route_pair(peers, routes.clone());
+
+    let mut peer_items: Vec<Value> = pairs.iter().map(peer_item).collect();
+    // Local-node row, mirroring easytier-cli's PeerTableItem::from(NodeInfo).
+    peer_items.insert(
+        0,
+        serde_json::json!({
+            "cidr": node_info.ipv4_addr,
+            "ipv4": node_info.ipv4_addr.split('/').next().unwrap_or_default(),
+            "hostname": node_info.hostname,
+            "cost": "Local",
+            "lat_ms": "-",
+            "loss_rate": "-",
+            "rx_bytes": "-",
+            "tx_bytes": "-",
+            "tunnel_proto": "-",
+            "nat_type": node_info.stun_info.as_ref().map(|s| {
+                easytier::proto::common::NatType::try_from(s.udp_nat_type).map(|n| format!("{n:?}")).unwrap_or_else(|_| "Unknown".into())
+            }).unwrap_or_else(|| "Unknown".into()),
+            "id": node_info.peer_id.to_string(),
+            "version": node_info.version,
+        }),
+    );
+
+    let mut route_items: Vec<Value> = Vec::new();
+    route_items.push(serde_json::json!({
+        "ipv4": node_info.ipv4_addr,
+        "hostname": node_info.hostname,
+        "proxy_cidrs": node_info.proxy_cidrs.join(", "),
+        "next_hop_ipv4": "-",
+        "next_hop_hostname": "Local",
+        "next_hop_lat": 0.0,
+        "path_len": 0,
+        "path_latency": 0,
+        "next_hop_ipv4_lat_first": "-",
+        "next_hop_hostname_lat_first": "Local",
+        "path_len_lat_first": 0,
+        "path_latency_lat_first": 0,
+        "version": node_info.version,
+    }));
+    for p in &pairs {
+        if p.route.as_ref().map(|r| r.cost).unwrap_or_default() == 0 && p.route.as_ref().map(|r| r.peer_id).unwrap_or_default() == node_info.peer_id {
+            continue; // local route row already inserted
+        }
+        route_items.push(route_item(p, &pairs, &node_info));
+    }
+
+    let stun = node_info.stun_info.as_ref();
+    Ok(serde_json::json!({
+        "peers": peer_items,
+        "routes": route_items,
+        "node": {
+            "peer_id": node_info.peer_id,
+            "ipv4_addr": node_info.ipv4_addr,
+            "hostname": node_info.hostname,
+            "version": node_info.version,
+            "stun_info": stun.map(|s| serde_json::json!({
+                "udp_nat_type": s.udp_nat_type,
+                "public_ip": s.public_ip,
+            })),
+            "listeners": node_info.listeners,
+            "proxy_cidrs": node_info.proxy_cidrs,
+        },
+    }))
+}
 
 fn explain_timeout(method: &str, e: &easytier::proto::rpc_types::error::Error) -> String {
     let raw = format!("{e:#}");

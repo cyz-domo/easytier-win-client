@@ -813,6 +813,11 @@ fn quit_and_stop_networks(app: &tauri::AppHandle) {
 }
 
 #[tauri::command]
+async fn status_query(port: u16) -> Result<Value, String> {
+    remote_rpc::local_status_query(port).await
+}
+
+#[tauri::command]
 async fn remote_config_discover(host: String, port: u16, virtual_ip: String) -> Result<Value, String> {
     let info = remote_rpc::discover_remote_instance(&host, port, &virtual_ip).await?;
     serde_json::to_value(info).map_err(|e| e.to_string())
@@ -878,6 +883,7 @@ pub fn run() {
             stop_instance,
             is_port_in_use,
             run_cli,
+            status_query,
             service_request,
             install_service,
             start_service,
