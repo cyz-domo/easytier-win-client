@@ -5,46 +5,14 @@ import { defaultConfig, listenersForInstance, NetworkConfig, validateConfig } fr
 import { decodeTOML, encodeTOML } from './toml-codec';
 import { ConfigEditor } from './ConfigEditor';
 import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, latencyTone, parseHumanBytes, parseNodeJSON, parsePeerJSON, parseRouteJSON, routeTone } from './status-data';
-import { RemoteConfigEditor } from './RemoteConfigDialog';
-import { IconClipboard, IconCopy, IconDownload, IconGear, IconPlay, IconPlus, IconRefresh, IconRemote, IconSliders, IconStop, IconTerminal, IconTrash, IconUpload, IconUsers, IconGlobe } from './icons';
+import { IconClipboard, IconCopy, IconDownload, IconGear, IconPlay, IconPlus, IconRefresh, IconSliders, IconStop, IconTerminal, IconTrash, IconUpload, IconUsers, IconGlobe } from './icons';
 import easytierLogo from './assets/easytier-logo.png';
 
-function RemoteConfigPanel({ host, port, running, peers, onPickPeer, localIp, onPortChange }: {
-  host: string | null;
-  port: number;
-  running: boolean;
-  peers: PeerInfo[];
-  onPickPeer: (ip: string) => void;
-  localIp?: string;
-  onPortChange: (port: number) => void;
-}) {
-  if (!running) return <div className="card"><p className="list-empty">网络未运行。启动网络后才能访问远端节点的 RPC。</p></div>;
-  return (
-    <>
-      <div className="card">
-        <h3 className="card-title">选择远端节点</h3>
-        {peers.length === 0 && <p className="list-empty">暂无在线远端节点。</p>}
-        <div className="remote-peer-list">
-          {peers.map(p => {
-            const ip = p.ipv4 || '—';
-            return (
-              <button key={String(p.id ?? ip)} type="button" className={host === ip ? 'remote-peer active' : 'remote-peer'}
-                onClick={() => onPickPeer(ip)}>
-                <strong>{p.hostname || '未命名节点'}</strong>
-                <span className="hint-inline">{ip} · {p.version || '—'}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      {host && <div className="card"><h3 className="card-title">远程配置 — {host}</h3><RemoteConfigEditor key={`${host}:${port}`} host={host} port={port} /></div>}
-    </>
-  );
-}
+
 import { getServiceStatus, serviceRequest, ServiceInstanceState, ServiceStatus } from './service-client';
 
 type Status = 'running' | 'stopped' | 'starting' | 'stopping' | 'failed';
-type Tab = 'status' | 'peers' | 'routes' | 'config' | 'remote' | 'logs' | 'settings';
+type Tab = 'status' | 'peers' | 'routes' | 'config' | 'logs' | 'settings';
 
 interface Instance {
   id: string;
@@ -120,21 +88,6 @@ export default function App() {
   const [activeId, setActiveId] = useState<string>(() => load('easytier.active.v2', ''));
   const [tab, setTab] = useState<Tab>('status');
   const [pollEpoch, setPollEpoch] = useState(0);
-  const [remoteTarget, setRemoteTarget] = useState<{ host: string; port: number } | null>(null);
-  // Resolve the RPC port for a target: a peer that is actually one of this
-  // machine's own instances uses that instance's rpcPort (multi-instance
-  // hosts bind several portals); everything else defaults to 15888.
-  const resolvePortFor = (ip: string): number => {
-    for (const [id, s] of Object.entries(statusByInstance)) {
-      const nip = s.node?.ipv4_addr?.split('/')[0];
-      if (nip && nip === ip) return instances.find(i => i.id === id)?.rpcPort ?? 15888;
-    }
-    for (const i of instances) {
-      const vip = i.config.virtual_ipv4?.split('/')[0];
-      if (vip && vip === ip) return i.rpcPort;
-    }
-    return 15888;
-  };
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [runtime, setRuntime] = useState<runtimeInfo | null>(null);
   interface InstanceSnapshot { peers: PeerInfo[]; routes: RouteInfo[]; node: NodeStatus | null }
@@ -683,7 +636,7 @@ export default function App() {
   const running = current.status === 'running';
   const statusText = { running: '网络运行中', stopped: '网络已停止', starting: '正在启动…', stopping: '正在停止…', failed: '启动失败' }[current.status];
 
-  const navItems: [Tab, string][] = [['status', '状态总览'], ['peers', '组网成员'], ['routes', '路由信息'], ['config', '组网配置'], ['remote', '远程管理'], ['logs', '运行日志'], ['settings', '设置']];
+  const navItems: [Tab, string][] = [['status', '状态总览'], ['peers', '组网成员'], ['routes', '路由信息'], ['config', '组网配置'], ['logs', '运行日志'], ['settings', '设置']];
 
   return (
     <main className="app-shell">
@@ -834,19 +787,12 @@ export default function App() {
                     const isLocal = p.cost === 'Local';
                     const nodeType = isLocal ? '本机' : (route && (route.path_len ?? 0) > 1 ? '服务节点' : '普通节点');
                     const remoteIp = p.ipv4 || route?.ipv4?.split('/')[0];
-                    const openRemote = () => {
-                      if (isLocal || !remoteIp) return;
-                      setRemoteTarget({ host: remoteIp, port: resolvePortFor(remoteIp) });
-                      setTab('remote');
-                    };
                     return (
                       <tr key={String(p.id ?? i)}>
                         {visibleCols.includes('nodeid') && <td>{String(p.id ?? '—')}<div className="cell-sub">{nodeType}</div></td>}
                         {visibleCols.includes('ipv4') && <td>{p.ipv4 || '—'}{!isLocal && remoteIp && <div className="cell-sub">{nodeType}</div>}</td>}
                         {visibleCols.includes('cidr') && <td>{p.cidr || '—'}</td>}
-                        {visibleCols.includes('hostname') && <td>{!isLocal && remoteIp
-                          ? <button type="button" className="linklike" title="打开远程管理" onClick={openRemote}>{p.hostname || '—'}</button>
-                          : (p.hostname || '—')}</td>}
+{visibleCols.includes('hostname') && <td>{p.hostname || '—'}</td>}
                         {visibleCols.includes('cost') && <td><span className={`route-badge tone-${routeTone(p.cost)}`}>{p.cost || '—'}</span></td>}
                         {visibleCols.includes('proto') && <td>{p.tunnel_proto || '—'}</td>}
                         {visibleCols.includes('latency') && <td className={`tone-${latencyTone(p.lat_ms)}`}>{p.lat_ms || '—'}</td>}
@@ -928,18 +874,7 @@ export default function App() {
           </div>
         )}
 
-        {tab === 'remote' && (
-          <RemoteConfigPanel host={remoteTarget?.host ?? null} port={remoteTarget?.port ?? 15888} running={running} localIp={node?.ipv4_addr?.split('/')[0]} onPickPeer={(ip) => setRemoteTarget({ host: ip, port: resolvePortFor(ip) })} onPortChange={(p) => setRemoteTarget(t => (t ? { ...t, port: p } : t))} peers={visiblePeers.filter(p => {
-            const ip = p.ipv4 || routes.find(r => r.hostname === p.hostname)?.ipv4?.split('/')[0];
-            if (!ip) return false;
-            if (p.cost === 'Local') return false;
-            // DHCP may reassign our own virtual IP; the local node can still
-            // linger in the peer list as a remote-cost entry — never offer it.
-            const localIp = node?.ipv4_addr?.split('/')[0];
-            if (localIp && ip === localIp) return false;
-            return true;
-          })} />
-        )}
+        
 
         {tab === 'logs' && (
           <div className="card">

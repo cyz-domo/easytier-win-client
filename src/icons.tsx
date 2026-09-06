@@ -103,13 +103,6 @@ export const IconTerminal = (p: P) => (
   </svg>
 );
 
-export const IconRemote = (p: P) => (
-  <svg {...base(p)}>
-    <rect x="2" y="3" width="20" height="14" rx="2" />
-    <path d="M8 21h8M12 17v4M7 9l3 3-3 3M13 15h4" />
-  </svg>
-);
-
 export const IconRefresh = (p: P) => (
   <svg {...base(p)}>
     <path d="M23 4v6h-6M1 20v-6h6" />

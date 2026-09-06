@@ -818,17 +818,20 @@ async fn status_query(port: u16) -> Result<Value, String> {
 }
 
 #[tauri::command]
+#[cfg(feature = "remote-rpc")]
 async fn remote_config_discover(host: String, port: u16, virtual_ip: String) -> Result<Value, String> {
     let info = remote_rpc::discover_remote_instance(&host, port, &virtual_ip).await?;
     serde_json::to_value(info).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[cfg(feature = "remote-rpc")]
 async fn remote_config_load(host: String, port: u16, instance_id: String) -> Result<Value, String> {
     remote_rpc::load_remote_config(&host, port, &instance_id).await
 }
 
 #[tauri::command]
+#[cfg(feature = "remote-rpc")]
 async fn remote_config_patch(host: String, port: u16, instance_id: String, patch: Value) -> Result<Value, String> {
     remote_rpc::patch_remote_config(&host, port, &instance_id, patch).await
 }
@@ -888,8 +891,11 @@ pub fn run() {
             install_service,
             start_service,
             repair_service,
+            #[cfg(feature = "remote-rpc")]
             remote_config_discover,
+            #[cfg(feature = "remote-rpc")]
             remote_config_load,
+            #[cfg(feature = "remote-rpc")]
             remote_config_patch
         ])
         .run(tauri::generate_context!())

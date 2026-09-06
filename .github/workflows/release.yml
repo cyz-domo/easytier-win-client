@@ -10,13 +10,13 @@ on:
         default: main
         required: false
         type: string
-      publish_release:
-        description: Publish a GitHub Release after build
+      create_release:
+        description: Create a GitHub Release after build (true/false)
         default: false
         required: false
         type: boolean
-      release_tag:
-        description: Release tag when publishing (e.g. v0.1.0); required if publish_release is true
+      version:
+        description: Release version tag (e.g. v0.1.0); required if create_release is true
         default: ''
         required: false
         type: string
@@ -94,7 +94,7 @@ jobs:
         shell: pwsh
         run: |
           $release = 'src-tauri/target/${{ matrix.target }}/release'
-          $bundle = 'easytier-win-client_${{ matrix.arch }}_portable'
+          $bundle = "easytier-win-client_${{ matrix.arch }}_portable"
           New-Item -ItemType Directory -Force -Path "$bundle/core" | Out-Null
           Copy-Item "$release/easytier-win-client.exe" "$bundle/easytier-win-client.exe"
           Copy-Item "src-tauri/target/${{ matrix.target }}/release/easytier-service.exe" "$bundle/easytier-service.exe"
@@ -113,15 +113,13 @@ jobs:
             easytier-win-client_${{ matrix.arch }}_portable.zip
 
   release:
-    # Publish on tag push, or on manual dispatch with publish_release=true
-    # (and a release_tag for manual runs).
     if: >-
       startsWith(github.ref, 'refs/tags/v')
-      || (github.event_name == 'workflow_dispatch' && inputs.publish_release && inputs.release_tag != '')
+      || (github.event_name == 'workflow_dispatch' && inputs.create_release == true && inputs.version != '')
     needs: build
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
