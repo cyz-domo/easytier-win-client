@@ -176,6 +176,9 @@ impl RuntimeManager {
             child.kill().map_err(|e| e.to_string())?;
             let _ = child.wait();
         }
+        // The staged config is rewritten on every start; dropping it here
+        // keeps the temp dir from accumulating one file per stopped instance.
+        let _ = fs::remove_file(std::env::temp_dir().join(format!("easytier-{}.toml", cfg.id)));
         Ok(self.snapshot(cfg))
     }
     pub fn stop_all(&mut self) {
@@ -185,6 +188,7 @@ impl RuntimeManager {
                 let _ = child.kill();
                 let _ = child.wait();
             }
+            let _ = fs::remove_file(std::env::temp_dir().join(format!("easytier-{id}.toml")));
         }
     }
 }

@@ -34,8 +34,31 @@ mod windows_service {
         message: String,
         result: Option<serde_json::Value>,
         error: Option<String>,
+        updated_at: u128,
     }
     type Tasks = Arc<Mutex<HashMap<String, TaskState>>>;
+
+    /// Terminal (completed/failed) tasks are kept only so the frontend can
+    /// fetch their final status; prune them once they age out.
+    const TASK_RETENTION_MS: u128 = 10 * 60 * 1000;
+
+    fn task_timestamp() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    }
+
+    fn prune_finished_tasks(tasks: &Tasks) {
+        let now = task_timestamp();
+        tasks
+            .lock()
+            .unwrap()
+            .retain(|_, t| {
+                !matches!(t.phase.as_str(), "completed" | "failed")
+                    || now.saturating_sub(t.updated_at) < TASK_RETENTION_MS
+            });
+    }
 
     define_windows_service!(ffi_service_main, service_main);
 
@@ -150,12 +173,10 @@ mod windows_service {
                 }
             }
         }
-        let cache = ipc::new_cache();
         let tasks: Tasks = Arc::new(Mutex::new(HashMap::new()));
         let update_lock = Arc::new(Mutex::new(false));
         let state2 = state.clone();
         let runtime2 = runtime.clone();
-        let cache2 = cache.clone();
         let tasks2 = tasks.clone();
         let lock2 = update_lock.clone();
         let stopped2 = stopped_for_ipc.clone();
@@ -167,7 +188,6 @@ mod windows_service {
                         &state2,
                         &runtime2,
                         &state_path,
-                        &cache2,
                         &tasks2,
                         &lock2,
                         &stopped2,
@@ -221,16 +241,12 @@ mod windows_service {
         state: &Arc<Mutex<config_store::ServiceState>>,
         runtime: &Arc<Mutex<runtime_manager::RuntimeManager>>,
         path: &std::path::Path,
-        cache: &ipc::IdempotencyCache,
         tasks: &Tasks,
         update_lock: &Arc<Mutex<bool>>,
         stopped_opt: &Arc<Mutex<bool>>,
     ) -> ipc::Response {
         if req.protocol_version != ipc::PROTOCOL_VERSION {
             return ipc::error(&req, "invalid_request", "unsupported protocol version");
-        }
-        if let Some(old) = cache.lock().unwrap().get(&req.request_id).cloned() {
-            return old;
         }
         let result = dispatch(&req, state, runtime, tasks, update_lock, stopped_opt);
         let response = match result {
@@ -240,10 +256,6 @@ mod windows_service {
         if response.ok {
             let _ = config_store::save(path, &state.lock().unwrap());
         }
-        cache
-            .lock()
-            .unwrap()
-            .insert(req.request_id.clone(), response.clone());
         response
     }
 
@@ -330,6 +342,11 @@ mod windows_service {
                         return Err(("busy", "instance is running".into()));
                     }
                     s.instances.remove(pos);
+                    // Drop the retained log/error buffers (up to MAX_LOG_BYTES
+                    // each) so deleted instances stop costing memory.
+                    let mut r = runtime.lock().unwrap();
+                    r.logs.remove(id);
+                    r.errors.remove(id);
                     Ok(serde_json::json!({"removed": true}))
                 } else {
                     Err(("instance_not_found", "instance not found".into()))
@@ -498,6 +515,7 @@ mod windows_service {
                 }
                 *busy = true;
                 let task_id = format!("kernel-{}", task_timestamp());
+                prune_finished_tasks(&tasks);
                 tasks.lock().unwrap().insert(
                     task_id.clone(),
                     TaskState {
@@ -508,6 +526,7 @@ mod windows_service {
                         message: "内核更新已排队".into(),
                         result: None,
                         error: None,
+                        updated_at: task_timestamp(),
                     },
                 );
                 let tasks2 = tasks.clone();
@@ -522,13 +541,6 @@ mod windows_service {
             }
             _ => Err(("invalid_request", "unknown command".into())),
         }
-    }
-
-    fn task_timestamp() -> u128 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
     }
 
     fn set_task(
@@ -551,6 +563,7 @@ mod windows_service {
                 .map(|v| ((downloaded.saturating_mul(100) / v).min(100)) as u8);
             task.error = error;
             task.result = result;
+            task.updated_at = task_timestamp();
         }
     }
 

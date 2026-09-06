@@ -40,6 +40,9 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 const COOLDOWN: Duration = Duration::from_secs(30);
 const RPC_MAX_CONCURRENT_PER_ENDPOINT: usize = 2;
 const RPC_MAX_CONCURRENT_TOTAL: usize = 4;
+/// Each cached endpoint holds a live TCP tunnel and buffers; bound the pool
+/// and evict oldest-inserted entries so dead ports/hosts cannot accumulate.
+const RPC_MAX_ENDPOINTS: usize = 32;
 
 static RPC_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -68,6 +71,10 @@ struct RpcEndpointState {
 
 static RPC_CLIENTS: LazyLock<Mutex<HashMap<String, Arc<RpcEndpoint>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Insertion order of endpoint keys, used to evict the oldest entry when the
+/// pool reaches RPC_MAX_ENDPOINTS. May contain keys already removed via the
+/// failure paths; those are skipped during eviction.
+static RPC_CLIENT_ORDER: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 #[derive(Debug)]
 enum RpcError {
@@ -94,6 +101,16 @@ fn endpoint_for(host: &str, port: u16) -> Result<Arc<RpcEndpoint>, RpcError> {
     if let Some(ep) = clients.get(&client_id) {
         return Ok(Arc::clone(ep));
     }
+    if clients.len() >= RPC_MAX_ENDPOINTS {
+        let mut order = RPC_CLIENT_ORDER
+            .lock()
+            .map_err(|_| RpcError::Busy("RPC endpoint table unavailable".into()))?;
+        while clients.len() >= RPC_MAX_ENDPOINTS {
+            let Some(oldest) = order.first().cloned() else { break };
+            order.remove(0);
+            clients.remove(&oldest);
+        }
+    }
     let connector = TcpTunnelConnector::new(url.clone());
     let endpoint = Arc::new(RpcEndpoint {
         url: url.to_string(),
@@ -101,8 +118,26 @@ fn endpoint_for(host: &str, port: u16) -> Result<Arc<RpcEndpoint>, RpcError> {
         client: tokio::sync::Mutex::new(StandAloneClient::new(connector)),
         state: Mutex::new(RpcEndpointState::default()),
     });
-    clients.insert(client_id, Arc::clone(&endpoint));
+    clients.insert(client_id.clone(), Arc::clone(&endpoint));
+    if let Ok(mut order) = RPC_CLIENT_ORDER.lock() {
+        if !order.contains(&client_id) {
+            order.push(client_id);
+        }
+    }
     Ok(endpoint)
+}
+
+/// Drop the cached endpoint for a local instance's RPC portal. Called when an
+/// instance is stopped or removed so its TCP tunnel and buffers are released
+/// instead of lingering until the next failed poll.
+pub fn drop_local_endpoint(port: u16) {
+    let key = format!("rpc-127.0.0.1-{port}");
+    if let Ok(mut clients) = RPC_CLIENTS.lock() {
+        clients.remove(&key);
+    }
+    if let Ok(mut order) = RPC_CLIENT_ORDER.lock() {
+        order.retain(|k| k != &key);
+    }
 }
 
 fn validate_rpc_url(host: &str, port: u16) -> Result<url::Url, RpcError> {

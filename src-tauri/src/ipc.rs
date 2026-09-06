@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
     io::{BufRead, BufReader, Write},
-    sync::{Arc, Mutex},
 };
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_MESSAGE: usize = 1024 * 1024;
@@ -81,10 +79,9 @@ pub fn write_response<W: Write>(writer: &mut W, response: &Response) -> Result<(
         .and_then(|_| writer.flush())
         .map_err(|e| e.to_string())
 }
-pub type IdempotencyCache = Arc<Mutex<HashMap<String, Response>>>;
-pub fn new_cache() -> IdempotencyCache {
-    Arc::new(Mutex::new(HashMap::new()))
-}
+// No idempotency cache: the client mints a fresh UUID request_id per call, so
+// a cache could never hit — it would only accumulate every response (including
+// multi-megabyte log reads) for the life of the service process.
 #[cfg(windows)]
 mod windows_security {
     use super::MAX_MESSAGE;

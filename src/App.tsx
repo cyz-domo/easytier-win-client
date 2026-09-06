@@ -409,8 +409,23 @@ export default function App() {
 
   const removeInstance = (id: string) => {
     if (instances.length === 1) return;
+    const target = instances.find(i => i.id === id);
     setInstances(xs => xs.filter(i => i.id !== id));
     if (activeId === id) setActiveId(instances.find(i => i.id !== id)!.id);
+    // Release backend state: cached RPC endpoint for the instance's status
+    // port, retained log buffer, staged temp config, and this instance's
+    // traffic-ledger entries.
+    if (target) invoke('drop_status_endpoint', { port: target.rpcPort }).catch(() => undefined);
+    invoke('drop_instance_state', { id }).catch(() => undefined);
+    setTrafficTotals(m => {
+      const prefix = `${id}:`;
+      const nextM: Record<string, { rx: number; tx: number }> = {};
+      for (const [key, v] of Object.entries(m)) {
+        if (!key.startsWith(prefix)) nextM[key] = v;
+      }
+      localStorage.setItem('easytier.traffic.v1', JSON.stringify(nextM));
+      return nextM;
+    });
   };
 
   const renameInstance = (name: string) =>
@@ -473,6 +488,7 @@ export default function App() {
           rpc_whitelist_cidrs: current.rpcWhitelistCidrs ?? [],
         });
         await serviceRequest(running ? 'stop_instance' : 'start_instance', { instance_id: current.id });
+        if (running) invoke('drop_status_endpoint', { port: current.rpcPort }).catch(() => undefined);
         await refreshService();
         addLog(`[${current.name}] 服务已${running ? '停止' : '启动'}网络`);
         return;
@@ -485,6 +501,7 @@ export default function App() {
         const timeout = new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('停止操作超时（5 秒）——可再次点击「停止网络」重试')), 5000));
         await Promise.race([invoke('stop_instance', { id: current.id }), timeout]);
+        invoke('drop_status_endpoint', { port: current.rpcPort }).catch(() => undefined);
         setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, status: 'stopped' } : i)));
         addLog(`[${current.name}] 网络已停止`);
       } else {

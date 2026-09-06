@@ -342,12 +342,37 @@ fn stop_instance(
         child.kill().map_err(|e| e.to_string())?;
         let _ = child.wait();
     }
+    // The staged config is rewritten on every start; dropping it here keeps
+    // the temp dir from accumulating one file per stopped instance.
+    let _ = fs::remove_file(std::env::temp_dir().join(format!("easytier-{id}.toml")));
     Ok(InstanceState {
         id,
         status: InstanceStatus::Stopped,
         pid: None,
         error: None,
     })
+}
+
+#[tauri::command]
+fn drop_status_endpoint(port: u16) {
+    remote_rpc::drop_local_endpoint(port);
+}
+
+/// Release per-instance backend state (log buffer, last error) after the
+/// frontend deletes the instance; stopped instances keep their logs so a
+/// crash can still be diagnosed, but a deleted one should cost nothing.
+#[tauri::command]
+fn drop_instance_state(
+    id: String,
+    state: tauri::State<'_, Mutex<RuntimeProcesses>>,
+) -> Result<(), String> {
+    let mut p = state
+        .lock()
+        .map_err(|_| "runtime state unavailable".to_string())?;
+    p.logs.remove(&id);
+    p.last_error.remove(&id);
+    let _ = fs::remove_file(std::env::temp_dir().join(format!("easytier-{id}.toml")));
+    Ok(())
 }
 #[tauri::command]
 fn check_kernel_update(proxy: Option<String>) -> Result<KernelUpdateInfo, String> {
@@ -402,6 +427,8 @@ fn update_kernel(
                 child.kill().map_err(|e| e.to_string())?;
                 let _ = child.wait();
             }
+            remote_rpc::drop_local_endpoint(instance.rpc_port);
+            let _ = fs::remove_file(std::env::temp_dir().join(format!("easytier-{}.toml", instance.id)));
         }
     }
     kernel_updater::emit_progress(
@@ -884,6 +911,8 @@ pub fn run() {
             check_kernel_update,
             update_kernel,
             stop_instance,
+            drop_status_endpoint,
+            drop_instance_state,
             is_port_in_use,
             run_cli,
             status_query,
