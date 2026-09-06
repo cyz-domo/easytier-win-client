@@ -859,11 +859,10 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // Closing the window quits the client and takes the networks
-                // down with it (same path as the tray quit action).
+                // Closing the window only minimizes to the tray — networks
+                // keep running. Full teardown happens via the tray quit item.
                 api.prevent_close();
-                let app = window.app_handle().clone();
-                std::thread::spawn(move || quit_and_stop_networks(&app));
+                let _ = window.hide();
             }
         })
         .invoke_handler(tauri::generate_handler![
