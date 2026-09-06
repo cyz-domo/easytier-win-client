@@ -150,12 +150,12 @@ fn service_query() -> ServiceInstallation {
 }
 
 #[tauri::command]
-fn query_service_installation() -> ServiceInstallation {
-    service_query()
+async fn query_service_installation() -> Result<ServiceInstallation, String> {
+    Ok(service_query())
 }
 
 #[tauri::command]
-fn detect_runtime(runtime_dir: Option<String>) -> RuntimeInfo {
+async fn detect_runtime(runtime_dir: Option<String>) -> Result<RuntimeInfo, String> {
     let (core, cli) = paths(runtime_dir);
     let mut command = Command::new(&core);
     command
@@ -171,12 +171,12 @@ fn detect_runtime(runtime_dir: Option<String>) -> RuntimeInfo {
         .unwrap_or_else(|| "unknown".into())
         .trim()
         .to_string();
-    RuntimeInfo {
+    Ok(RuntimeInfo {
         core_path: core.display().to_string(),
         cli_path: cli.display().to_string(),
         version,
         available: core.exists() && cli.exists(),
-    }
+    })
 }
 #[tauri::command]
 fn get_instance_state(
@@ -570,7 +570,7 @@ mod job_object {
 }
 
 #[tauri::command]
-fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<String, String> {
+async fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<String, String> {
     let (_, cli) = paths(runtime_dir);
     let mut child = Command::new(cli);
     child
@@ -651,7 +651,7 @@ fn scm_command(args: &[&str], code: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn install_service() -> Result<String, String> {
+async fn install_service() -> Result<String, String> {
     #[cfg(windows)]
     {
         let exe = std::env::current_exe().map_err(|e| format!("service_path_invalid: {e}"))?;
@@ -707,7 +707,7 @@ fn install_service() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn start_service() -> Result<String, String> {
+async fn start_service() -> Result<String, String> {
     #[cfg(windows)]
     {
         // The installer grants the interactive user start/stop rights via
@@ -736,8 +736,8 @@ fn start_service() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn repair_service() -> Result<String, String> {
-    install_service()
+async fn repair_service() -> Result<String, String> {
+    install_service().await
 }
 
 /// Sweep orphaned CLI helpers, stop every running network (GUI children and

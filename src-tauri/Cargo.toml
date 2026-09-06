@@ -44,3 +44,8 @@ easytier = { git = "https://github.com/EasyTier/EasyTier", tag = "v2.6.4", defau
 windows-service = "0.7"
 named_pipe = "0.4"
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_IO", "Win32_System_Threading"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

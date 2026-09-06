@@ -479,7 +479,7 @@ fn explain_timeout(method: &str, e: &easytier::proto::rpc_types::error::Error) -
     let raw = format!("{e:#}");
     if raw.contains("Timeout") || raw.contains("deadline") {
         format!(
-            "{method} failed: {raw}。已连上对端但对端未应答：请在对端设备的设置里开启「允许远程管理」并确认其白名单包含本机的虚拟 IP，然后在对端重启网络"
+            "{method} failed: {raw}。已连上对端但对端未应答：请在对端设备的设置里开启「允许远程管理」并确认其白名单包含本机的虚拟 IP，然后在对端重启网络。若对端已配置过白名单，通常说明对端核心进程尚未以新参数重启（此时对端仅接受环回连接）"
         )
     } else {
         format!("{method} failed: {raw}")

@@ -191,7 +191,7 @@ export default function App() {
   useEffect(() => { invoke<runtimeInfo>('detect_runtime', {}).then(v => setRuntime({ ...v, core_path: v.core_path ?? 'core/easytier-core.exe' })).catch(() => setRuntime(null)); }, []);
   const refreshService = async (opts?: { skipAutoStart?: boolean }) => {
     try {
-      const installed = await invoke<{ installed: boolean; running: boolean; message?: string }>('query_service_installation');
+      const installed = await invoke<{ installed: boolean; running: boolean; message?: string }>('query_service_installation').catch(e => ({ installed: false, running: false, message: String(e) }));
       if (!installed.installed) {
         setService({ installed: false, running: false, message: installed.message });
         return;
@@ -206,7 +206,7 @@ export default function App() {
             try {
               await invoke('start_service');
               await new Promise(r => setTimeout(r, 1500));
-              let q = await invoke<{ installed: boolean; running: boolean }>('query_service_installation');
+              let q = await invoke<{ installed: boolean; running: boolean }>('query_service_installation').catch(() => ({ installed: true, running: false }));
               if (q.installed && !q.running) {
                 sessionStorage.setItem('easytier.service-repaired.v1', '1');
                 setService({ installed: true, running: false, message: '服务启动异常，正在自动修复…' });
@@ -663,7 +663,7 @@ export default function App() {
         <nav>
           {instances.map(i => (
             <button className={i.id === current.id ? 'nav-item active' : 'nav-item'} onClick={() => { setActiveId(i.id); setTab('status'); }} key={i.id}>
-              <span className={i.status === 'running' ? 'dot on' : i.status === 'failed' ? 'dot err' : i.status === 'starting' || i.status === 'stopping' ? 'dot connecting' : 'dot'} />{i.name}
+              <span className={i.status === 'running' ? 'dot on' : i.status === 'failed' ? 'dot err' : i.status === 'starting' || i.status === 'stopping' ? 'dot connecting' : 'dot'} /><span className="nav-name">{i.name}</span>
               <span className="chevron">›</span>
             </button>
           ))}
