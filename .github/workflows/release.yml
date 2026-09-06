@@ -83,6 +83,21 @@ jobs:
           Copy-Item -Path ($core.DirectoryName + '/*') -Destination src-tauri/core-stage -Recurse -Force
           if (-not (Test-Path src-tauri/core-stage/easytier-cli.exe)) { throw 'easytier-cli.exe not found in downloaded archive' }
 
+      - name: Stage easytier third_party link libs
+        shell: pwsh
+        run: |
+          # easytier's build script adds a RELATIVE link-search path
+          # "easytier/third_party/<arch>/" (Packet.lib etc.); the crate sources
+          # live in the cargo git checkout, so mirror them next to src-tauri.
+          cargo fetch --manifest-path src-tauri/Cargo.toml
+          $tp = Resolve-Path "$env:CARGO_HOME\git\checkouts\easytier-*\*\easytier\third_party" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $tp) { throw 'easytier third_party not found in cargo git checkouts' }
+          New-Item -ItemType Directory -Force -Path src-tauri/easytier | Out-Null
+          Copy-Item -Recurse -Force -Path $tp.Path -Destination src-tauri/easytier/third_party
+          foreach ($required in @('x86_64/Packet.lib','arm64/Packet.lib')) {
+            if (-not (Test-Path "src-tauri/easytier/third_party/$required")) { throw "Missing link lib: $required" }
+          }
+
       - name: Build service binary
         run: cargo build --release --target ${{ matrix.target }} --manifest-path src-tauri/Cargo.toml --bin easytier-service
 
