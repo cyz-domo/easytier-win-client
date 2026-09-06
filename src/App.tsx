@@ -385,6 +385,14 @@ export default function App() {
       if (all.length) {
         if (!confirm(`监听器端口冲突：\n\n${all.join('\n')}\n\n建议修改本实例监听器端口（或改用端口 0 自动分配）后再启动。仍要继续吗？`)) return;
       }
+      // TUN adapter names must be unique machine-wide: two cores claiming the
+      // same dev_name fight over one Wintun adapter (no IP, route flapping).
+      if (current.config.dev_name.trim() && instances.some(i => i.id !== current.id && i.config.dev_name === current.config.dev_name)) {
+        const unique = `et_${crypto.randomUUID().replace(/-/g, '').slice(0, 6)}`;
+        setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, config: { ...i.config, dev_name: unique } } : i)));
+        current.config.dev_name = unique;
+        addLog(`[${current.name}] TUN 设备名与其它实例冲突，已自动改为 ${unique}`);
+      }
     }
     setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, status: running ? 'stopping' : 'starting' } : i)));
     try {
