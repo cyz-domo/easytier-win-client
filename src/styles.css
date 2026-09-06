@@ -17,7 +17,7 @@ nav{display:grid;gap:4px}
 .dot{width:7px;height:7px;border-radius:50%;background:#c7cbd1;flex:none}
 .dot.on{background:#34c759}.dot.connecting{background:#ff9500}.dot.err{background:#ff3b30}
 .chevron{margin-left:auto;font-size:18px;color:#aeb4bc}
-.add-button{color:#1d6df2;font-size:13px;padding:15px 12px;display:inline-flex;align-items:center;gap:7px;border-radius:9px;transition:background .15s}.add-button:hover{background:#eef4ff}
+.add-button{color:var(--accent);font-size:13px;padding:15px 12px;display:inline-flex;align-items:center;gap:7px;border-radius:9px;transition:background .15s}.add-button:hover{background:#eef4ff}
 .sidebar-bottom{margin-top:auto;display:grid;gap:16px}
 .quiet{color:#6f747b;padding:0 12px;font-size:13px;display:inline-flex;align-items:center;gap:7px;border-radius:9px;transition:background .15s,color .15s}.quiet:hover{background:#ffffff73;color:#202124}
 .version{color:#b0b4ba;font-size:10px;padding:0 12px}
@@ -128,10 +128,10 @@ button.primary:active:not(:disabled),button.stop:active:not(:disabled){transform
 .route-badge.tone-connected{background:#34c75922}.route-badge.tone-connecting{background:#ff950022}.route-badge.tone-error{background:#ff3b3022}.route-badge.tone-local{background:#0891b21a}.route-badge.tone-muted{background:#f1f3f5}
 .hint-inline{font-size:10px;color:#9aa0a6}
 .toml-preview{margin-top:14px}
-.toml-preview summary{font-size:12px;color:#1d6df2;cursor:pointer}
+.toml-preview summary{font-size:12px;color:var(--accent);cursor:pointer}
 .toml-preview pre{background:#f6f7f8;border:1px solid var(--line,#e3e5e8);border-radius:var(--radius-sm);padding:14px;font-size:11px;overflow-x:auto;margin-top:10px}
 .toml-editor{width:100%;box-sizing:border-box;background:#f6f7f8;border:1px solid var(--line,#e3e5e8);border-radius:var(--radius-sm);padding:14px;font-family:'Cascadia Code',Consolas,monospace;font-size:11px;line-height:1.5;color:#202124;resize:vertical;overflow:auto;margin-top:10px}
-.toml-editor:focus{outline:none;border-color:#1d6df2}
+.toml-editor:focus{outline:none;border-color:var(--accent)}
 .toml-error{color:#d93025;font-size:12px;margin:8px 0 0}
 .toml-actions{display:flex;gap:8px;margin-top:10px}
 .kernel-update-controls{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap}
