@@ -27,6 +27,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# Enforces a single app instance across portable and installed builds (they
+# share one identifier): a second launch exits and surfaces the first one.
+# Without this, quitting one of two running clients stops its cores and cuts
+# the network the other client still shows as up.
+tauri-plugin-single-instance = "2"
 wait-timeout = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 # xz feature disabled: easytier's zip v4 pulls liblzma-sys, and cargo forbids

@@ -865,6 +865,17 @@ async fn remote_config_patch(host: String, port: u16, instance_id: String, patch
 
 pub fn run() {
     tauri::Builder::default()
+        // Must be the first registered plugin: while an instance is already
+        // running, any new launch (portable or installed — they share the
+        // identifier and thus one mutex) exits immediately and this callback
+        // surfaces the existing window instead of starting a second client.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .manage(Mutex::new(RuntimeProcesses::default()))
         .manage(KernelUpdateLock::default())
         .setup(|app| {
