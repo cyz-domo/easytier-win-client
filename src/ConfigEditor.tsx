@@ -30,16 +30,15 @@ export function NumberField({ label, value, onChange, disabled, min, max }: Fiel
 }
 
 export function ToggleField({ label, value, onChange, hint }: { label: string; value: boolean | null; onChange: (v: boolean | null) => void; hint?: string }) {
+  // Two-state UX: these flags default to false in the core, so null and
+  // false are equivalent — cycling through a third "unset" state made
+  // single clicks look like no-ops.
   const checked = value === true;
   return (
     <label className="toggle-row" title={hint}>
       <span className="field-label">{label}</span>
       <button type="button" role="switch" aria-checked={checked} className={checked ? 'switch on' : 'switch'}
-        onClick={() => {
-          if (value === null) onChange(true);
-          else if (value === true) onChange(false);
-          else onChange(null);
-        }}>
+        onClick={() => onChange(!checked)}>
         <span className="knob" />
       </button>
     </label>

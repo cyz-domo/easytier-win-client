@@ -120,15 +120,13 @@ export default function App() {
   const [remoteTabHost, setRemoteTabHost] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [runtime, setRuntime] = useState<runtimeInfo | null>(null);
-  const [peers, setPeers] = useState<PeerInfo[]>([]);
-  const [routes, setRoutes] = useState<RouteInfo[]>([]);
-  const [node, setNode] = useState<NodeStatus | null>(null);
+  interface InstanceSnapshot { peers: PeerInfo[]; routes: RouteInfo[]; node: NodeStatus | null }
+  const [statusByInstance, setStatusByInstance] = useState<Record<string, InstanceSnapshot>>({});
   const [logsByInstance, setLogsByInstance] = useState<Record<string, string[]>>({});
   const [networkLogs, setNetworkLogs] = useState<string[]>([]);
   const [logView, setLogView] = useState<'runtime' | 'network'>('runtime');
   const [isElevated, setIsElevated] = useState<boolean | null>(null);
   const [elevationNoticeShown, setElevationNoticeShown] = useState(false);
-  const [statusError, setStatusError] = useState<string | null>(null);
   const [secretVisible, setSecretVisible] = useState(false);
   const [visibleCols, setVisibleCols] = useState<PeerColumn[]>(() =>
     load('easytier.peer-cols.v2', PEER_COLUMNS.filter(c => c.defaultOn).map(c => c.key)));
@@ -152,6 +150,11 @@ export default function App() {
   const kernelTaskId = kernelUpdate?.task_id ?? null;
 
   const current = useMemo(() => instances.find(i => i.id === activeId) ?? instances[0], [instances, activeId]);
+  const runningNow = current?.status === 'running';
+  const curSnap = (runningNow ? statusByInstance[current?.id ?? ''] : undefined) ?? { peers: [] as PeerInfo[], routes: [] as RouteInfo[], node: null as NodeStatus | null };
+  const peers = curSnap.peers;
+  const routes = curSnap.routes;
+  const node = curSnap.node;
   const visiblePeers = useMemo(() => {
     if (showPeerNodes || !current) return peers;
     return peers.filter(peer => !String(peer.hostname ?? '').toLowerCase().startsWith('publicserver'));
@@ -170,14 +173,23 @@ export default function App() {
       if (!installed.running) {
         setService({ installed: true, running: false, message: '正在启动后台服务…' });
         // Auto-start in the background so the UI never waits on UAC/SCM.
-        if (!opts?.skipAutoStart) {
+        // If the service starts but immediately stops (stale registration,
+        // moved exe, leftover state), repair it once automatically.
+        if (!opts?.skipAutoStart && !sessionStorage.getItem('easytier.service-repaired.v1')) {
           void (async () => {
             try {
               await invoke('start_service');
-              await new Promise(r => setTimeout(r, 600));
+              await new Promise(r => setTimeout(r, 1500));
+              let q = await invoke<{ installed: boolean; running: boolean }>('query_service_installation');
+              if (q.installed && !q.running) {
+                sessionStorage.setItem('easytier.service-repaired.v1', '1');
+                setService({ installed: true, running: false, message: '服务启动异常，正在自动修复…' });
+                await invoke('repair_service');
+                await new Promise(r => setTimeout(r, 1200));
+              }
               await refreshService({ skipAutoStart: true });
             } catch {
-              setService({ installed: true, running: false, message: '服务已安装但启动失败（可在设置中重试）。' });
+              setService({ installed: true, running: false, message: '服务已安装但启动失败（可在设置中重试或修复）。' });
             }
           })();
         }
@@ -278,31 +290,41 @@ export default function App() {
   // hung CLI round can never pile up overlapping rounds. Skipped when the
   // status-affecting tabs are not visible or the window is hidden — each
   // round spawns three CLI processes, so idle polling is real load.
+  // Poll ALL running instances in parallel so switching between them shows
+  // last-known data instantly instead of waiting for a fresh query.
   useEffect(() => {
-    if (current?.status !== 'running') { setPeers([]); setRoutes([]); setNode(null); setStatusError(null); return; }
+    const running = instances.filter(i => i.status === 'running' && i.rpcPort);
+    if (running.length === 0) { setStatusByInstance({}); return; }
     const pollWorthy = tab === 'status' || tab === 'peers' || tab === 'routes';
     if (!pollWorthy || document.hidden) return;
     let alive = true;
     let timer: number | null = null;
     const refresh = async () => {
-      try {
-        // One persistent-connection RPC query replaces three CLI subprocess
-        // spawns — ~5ms instead of ~0.5s of process overhead per poll.
-        const snapshot = await invoke<{ peers: PeerInfo[]; routes: RouteInfo[]; node: NodeStatus }>('status_query', { port: current.rpcPort });
-        if (!alive) return;
-        setPeers(parsePeerJSON(JSON.stringify(snapshot.peers)));
-        setRoutes(parseRouteJSON(JSON.stringify(snapshot.routes)));
-        setNode(snapshot.node ?? null);
-        setStatusError(null);
-      } catch (e) {
-        if (alive) setStatusError(String(e));
-      } finally {
-        if (alive) timer = window.setTimeout(() => void refresh(), refreshSecs * 1000);
-      }
+      const results = await Promise.all(running.map(async ({ id, rpcPort }) => {
+        try {
+          // One persistent-connection RPC query replaces three CLI subprocess
+          // spawns — ~1ms warm instead of ~0.5s of process overhead.
+          const snapshot = await invoke<InstanceSnapshot>('status_query', { port: rpcPort });
+          return [id, snapshot] as const;
+        } catch {
+          return [id, null] as const; // keep last-known data on failure
+        }
+      }));
+      if (!alive) return;
+      setStatusByInstance(prev => {
+        const next = { ...prev };
+        for (const [id, snapshot] of results) {
+          if (snapshot) next[id] = snapshot;
+        }
+        return next;
+      });
+      timer = window.setTimeout(() => void refresh(), refreshSecs * 1000);
     };
     void refresh();
     return () => { alive = false; if (timer != null) window.clearTimeout(timer); };
-  }, [current?.id, current?.status, current?.rpcPort, refreshSecs, tab, serviceMode, pollEpoch]);
+  }, [instances, tab, refreshSecs, pollEpoch, serviceMode]);
+
+
 
   // Re-arm status polling when the window becomes visible again; the polling
   // effect above deliberately skips rounds while document.hidden is true.
@@ -317,7 +339,6 @@ export default function App() {
     const key = current?.id ?? 'app';
     return { ...m, [key]: [...(m[key] ?? []).slice(-300), `${new Date().toLocaleTimeString()}  ${line}`] };
   });
-  useEffect(() => { if (statusError) addLog(`状态查询失败：${statusError}`); }, [statusError]);
 
   const patchConfig = (patch: Partial<NetworkConfig>) => {
     setInstances(xs => xs.map(i => {
@@ -702,8 +723,8 @@ export default function App() {
               </div>
             )}
             {!running && <p className="list-empty">网络未运行，启动后此处显示在线成员。</p>}
-            {running && statusError && <p className="list-empty err">状态查询失败：{statusError}</p>}
-            {running && !statusError && (
+            {running && !curSnap.peers.length && !curSnap.node && <p className="list-empty">正在获取实例状态…（实例启动中或短暂无响应时会自动恢复）</p>}
+            {running && (
               <div className="table-scroll">
               <table className="data-table">
                 <thead><tr>
