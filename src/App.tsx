@@ -6,12 +6,14 @@ import { decodeTOML, encodeTOML } from './toml-codec';
 import { ConfigEditor } from './ConfigEditor';
 import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, latencyTone, parseHumanBytes, parseNodeJSON, parsePeerJSON, parseRouteJSON, routeTone } from './status-data';
 import { RemoteConfigDialog, RemoteConfigEditor } from './RemoteConfigDialog';
+import { IconClipboard, IconCopy, IconDownload, IconGear, IconPlay, IconPlus, IconRefresh, IconRemote, IconSliders, IconStop, IconTerminal, IconTrash, IconUpload, IconUsers, IconGlobe } from './icons';
 
-function RemoteConfigPanel({ host, running, peers, onPickPeer }: {
+function RemoteConfigPanel({ host, running, peers, onPickPeer, localIp }: {
   host: string | null;
   running: boolean;
   peers: PeerInfo[];
   onPickPeer: (ip: string) => void;
+  localIp?: string;
 }) {
   if (!running) return <div className="card"><p className="list-empty">网络未运行。启动网络后才能访问远端节点的 RPC。</p></div>;
   return (
@@ -585,9 +587,9 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <button className="add-button" onClick={addInstance}>＋ 新建实例</button>
+        <button className="add-button" onClick={addInstance}><IconPlus size={14} /> 新建实例</button>
         <div className="sidebar-bottom">
-          <button className="quiet" onClick={() => setTab('settings')}>⚙　设置</button>
+          <button className="quiet" onClick={() => setTab('settings')}><IconGear size={14} /> 设置</button>
           <span className="version">{runtime?.version ? `核心 ${runtime.version.split(' ').pop()}` : '核心未检测'} · 客户端 0.1.0</span>
         </div>
       </aside>
@@ -603,6 +605,7 @@ export default function App() {
           <div className="header-actions">
             {running && <span className="rpc-badge">RPC :{current.rpcPort}</span>}
               <button className={running ? 'stop' : 'primary'} onClick={() => void toggle()} disabled={current.status === 'starting' || current.status === 'stopping' || (!!kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase))}>
+              {running ? <IconStop size={14} /> : <IconPlay size={14} />}
               {running ? '停止网络' : '启动网络'}
             </button>
           </div>
@@ -635,9 +638,9 @@ export default function App() {
             </div>
             <div className="section-heading"><div><h2>快速操作</h2><p>常用配置与信息入口</p></div></div>
             <div className="config-grid">
-              <button className="config-card" onClick={() => setTab('config')}><span className="config-icon">◎</span><div><b>组网配置</b><small>网络名称、密钥、地址与高级参数</small></div><span>›</span></button>
-              <button className="config-card" onClick={() => setTab('peers')}><span className="config-icon">⇄</span><div><b>组网成员</b><small>查看在线节点与连接质量</small></div><span>›</span></button>
-              <button className="config-card" onClick={() => setTab('logs')}><span className="config-icon">≡</span><div><b>运行日志</b><small>启动、停止与错误记录</small></div><span>›</span></button>
+              <button className="config-card" onClick={() => setTab('config')}><span className="config-icon"><IconGlobe size={15} /></span><div><b>组网配置</b><small>网络名称、密钥、地址与高级参数</small></div><span>›</span></button>
+              <button className="config-card" onClick={() => setTab('peers')}><span className="config-icon"><IconUsers size={15} /></span><div><b>组网成员</b><small>查看在线节点与连接质量</small></div><span>›</span></button>
+              <button className="config-card" onClick={() => setTab('logs')}><span className="config-icon"><IconTerminal size={15} /></span><div><b>运行日志</b><small>启动、停止与错误记录</small></div><span>›</span></button>
             </div>
           </>
         )}
@@ -648,7 +651,7 @@ export default function App() {
               <h3 className="card-title">组网成员{running ? `（${visiblePeers.length}${showPeerNodes ? '' : `，已隐藏 ${peers.length - visiblePeers.length} 个 Peer`}）` : ''}</h3>
               <div className="title-actions">
                 <span className="hint-inline">刷新 {refreshSecs}s</span>
-                <button className="ghost" onClick={() => setShowDisplaySettings(x => !x)}>显示设置</button>
+                <button className="ghost" onClick={() => setShowDisplaySettings(x => !x)}><IconSliders size={13} /> 显示设置</button>
               </div>
             </div>
             {showDisplaySettings && (
@@ -781,11 +784,11 @@ export default function App() {
                 <input className="title-input" value={current.name} onChange={e => renameInstance(e.target.value)} />
                 {configSaved && <span className="save-status" role="status">✓ 已自动保存</span>}
               <div className="title-actions">
-                <button className="ghost" onClick={() => void openTomlFile()}>导入 TOML</button>
-                <button className="ghost" onClick={async () => { try { await importToml(await navigator.clipboard.readText()); } catch (e) { alert(`读取剪贴板失败：${String(e)}`); } }}>剪贴板导入</button>
-                <button className="ghost" onClick={() => void exportToml()}>导出 TOML</button>
-                <button className="ghost" onClick={() => void exportToml(true)}>复制</button>
-                <button className="mini-button danger" onClick={() => removeInstance(current.id)}>删除实例</button>
+                <button className="ghost" onClick={() => void openTomlFile()}><IconUpload size={13} /> 导入 TOML</button>
+                <button className="ghost" onClick={async () => { try { await importToml(await navigator.clipboard.readText()); } catch (e) { alert(`读取剪贴板失败：${String(e)}`); } }}><IconClipboard size={13} /> 剪贴板导入</button>
+                <button className="ghost" onClick={() => void exportToml()}><IconDownload size={13} /> 导出 TOML</button>
+                <button className="ghost" onClick={() => void exportToml(true)}><IconCopy size={13} /> 复制</button>
+                <button className="mini-button danger" onClick={() => removeInstance(current.id)}><IconTrash size={12} /> 删除实例</button>
               </div>
             </div>
             <ConfigEditor config={current.config} onChange={patchConfig} showAdvanced={showAdvanced} onToggleAdvanced={() => setShowAdvanced(x => !x)} />
@@ -808,7 +811,16 @@ export default function App() {
         )}
 
         {tab === 'remote' && (
-          <RemoteConfigPanel host={remoteTabHost} running={running} onPickPeer={(ip) => setRemoteTabHost(ip)} peers={visiblePeers.filter(p => p.cost !== 'Local' && (p.ipv4 || routes.find(r => r.hostname === p.hostname)?.ipv4))} />
+          <RemoteConfigPanel host={remoteTabHost} running={running} localIp={node?.ipv4_addr?.split('/')[0]} onPickPeer={(ip) => setRemoteTabHost(ip)} peers={visiblePeers.filter(p => {
+            const ip = p.ipv4 || routes.find(r => r.hostname === p.hostname)?.ipv4?.split('/')[0];
+            if (!ip) return false;
+            if (p.cost === 'Local') return false;
+            // DHCP may reassign our own virtual IP; the local node can still
+            // linger in the peer list as a remote-cost entry — never offer it.
+            const localIp = node?.ipv4_addr?.split('/')[0];
+            if (localIp && ip === localIp) return false;
+            return true;
+          })} />
         )}
 
         {tab === 'logs' && (
