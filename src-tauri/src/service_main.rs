@@ -22,8 +22,66 @@ mod windows_service {
     };
     use std::{
         collections::HashMap,
+        fs::{self, OpenOptions},
+        io::Write,
+        path::PathBuf,
         sync::{Arc, Mutex},
     };
+
+    const TASK_RETENTION_MS: u128 = 10 * 60 * 1000;
+    const SERVICE_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+    const SERVICE_LOG_BACKUPS: u32 = 4;
+    type ServiceLogger = Arc<Mutex<RotatingLog>>;
+
+    struct RotatingLog {
+        path: PathBuf,
+        max_bytes: u64,
+        backups: u32,
+    }
+
+    impl RotatingLog {
+        fn new() -> Self {
+            let dir = std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(PathBuf::from))
+                .unwrap_or_else(config_store::data_dir)
+                .join("logs");
+            Self {
+                path: dir.join("service.log"),
+                max_bytes: SERVICE_LOG_MAX_BYTES,
+                backups: SERVICE_LOG_BACKUPS,
+            }
+        }
+
+        fn write(&mut self, level: &str, message: &str) {
+            let line = format!(
+                "{} [{}] {}\r\n",
+                task_timestamp(),
+                level,
+                message.replace(['\r', '\n'], " ")
+            );
+            let Some(parent) = self.path.parent() else { return };
+            if fs::create_dir_all(parent).is_err() { return; }
+            let current_len = fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+            if current_len.saturating_add(line.len() as u64) > self.max_bytes {
+                for index in (1..=self.backups).rev() {
+                    let from = parent.join(format!("service.log.{index}"));
+                    let to = parent.join(format!("service.log.{}", index + 1));
+                    if index == self.backups { let _ = fs::remove_file(&from); }
+                    else { let _ = fs::rename(&from, &to); }
+                }
+                let _ = fs::rename(&self.path, parent.join("service.log.1"));
+            }
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&self.path) {
+                let _ = file.write_all(line.as_bytes());
+                let _ = file.flush();
+            }
+        }
+    }
+
+    fn service_log(logger: &ServiceLogger, level: &str, message: impl AsRef<str>) {
+        if let Ok(mut log) = logger.lock() { log.write(level, message.as_ref()); }
+    }
 
     #[derive(Clone)]
     struct TaskState {
@@ -40,7 +98,6 @@ mod windows_service {
 
     /// Terminal (completed/failed) tasks are kept only so the frontend can
     /// fetch their final status; prune them once they age out.
-    const TASK_RETENTION_MS: u128 = 10 * 60 * 1000;
 
     fn task_timestamp() -> u128 {
         std::time::SystemTime::now()
@@ -66,6 +123,8 @@ mod windows_service {
         service_dispatcher::start("EasyTierService", ffi_service_main).map_err(|e| e.to_string())
     }
     fn service_main(args: Vec<std::ffi::OsString>) {
+        let logger = Arc::new(Mutex::new(RotatingLog::new()));
+        service_log(&logger, "INFO", "EasyTierService starting");
         let stopped = Arc::new(Mutex::new(false));
         let stop_flag = stopped.clone();
         let status_handle =
@@ -78,15 +137,13 @@ mod windows_service {
             }) {
                 Ok(handle) => handle,
                 Err(error) => {
-                    write_startup_error(&format!(
-                        "service control handler registration failed: {error}"
-                    ));
+                    service_log(&logger, "ERROR", format!("service control handler registration failed: {error}"));
                     return;
                 }
             };
-        let result = run_service(args, stopped, &status_handle);
+        let result = run_service(args, stopped, &status_handle, logger.clone());
         if let Err(error) = result {
-            write_startup_error(&error);
+            service_log(&logger, "ERROR", &error);
             let _ = status_handle.set_service_status(ServiceStatus {
                 service_type: ServiceType::OWN_PROCESS,
                 current_state: ServiceState::Stopped,
@@ -111,7 +168,9 @@ mod windows_service {
         args: Vec<std::ffi::OsString>,
         stopped: Arc<Mutex<bool>>,
         status_handle: &::windows_service::service_control_handler::ServiceStatusHandle,
+        logger: ServiceLogger,
     ) -> Result<(), String> {
+        service_log(&logger, "INFO", "service control handler registered");
         let stopped_for_ipc = stopped.clone();
         let interactive_sid = args
             .iter()
@@ -159,27 +218,60 @@ mod windows_service {
             let configs = state.lock().unwrap().instances.clone();
             let mut manager = runtime.lock().unwrap();
             // A crashed service leaves its core children alive (orphaned but
-            // still holding the ports). An orphan is proof the network was
-            // running when the service died, so restore it even without
-            // auto_start; a clean boot only starts auto_start instances.
-            let orphaned = sweep_orphan_cores(
+            // still holding the ports). A healthy orphan (RPC portal already
+            // answering) is adopted as-is: killing and restarting it would
+            // drop every peer connection and reset traffic for a network that
+            // is running perfectly well. Unhealthy or non-running instances
+            // get a clean restart — an orphan also proves the network was
+            // running, so it is restored even without auto_start; a clean
+            // boot only starts auto_start instances.
+            use config_store::DesiredState;
+            let orphans = find_orphan_cores(
                 &configs.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
             );
+            let running_ids: Vec<&str> = configs
+                .iter()
+                .filter(|c| c.desired_state == DesiredState::Running)
+                .map(|c| c.id.as_str())
+                .collect();
+            for (id, pid) in &orphans {
+                if !running_ids.contains(&id.as_str()) {
+                    // Desired stopped (e.g. the service died between the
+                    // user's stop request and the kill): take it down.
+                    runtime_manager::terminate_pid(*pid);
+                    continue;
+                }
+                let config = configs.iter().find(|c| &c.id == id).unwrap();
+                if manager.portal_ready(config) {
+                    manager.adopt(config, *pid);
+                }
+            }
             for config in configs
                 .iter()
-                .filter(|c| {
-                    c.desired_state == config_store::DesiredState::Running
-                        && (c.auto_start || orphaned.contains(&c.id))
-                })
+                .filter(|c| c.desired_state == DesiredState::Running)
             {
-                if let Err(error) = manager.start(config) {
-                    state
-                        .lock()
-                        .unwrap()
-                        .instances
-                        .iter_mut()
-                        .find(|c| c.id == config.id)
-                        .map(|c| c.last_error = Some(error));
+                if manager.adopted.contains_key(&config.id) {
+                    continue;
+                }
+                // Kill any leftover unhealthy orphan first: it holds the
+                // instance's ports and would make a clean restart impossible.
+                // An orphan also proves the network was running, so restore
+                // it even without auto_start; a clean boot only starts
+                // auto_start instances.
+                let orphan = orphans.iter().find(|(id, _)| id == &config.id);
+                if let Some((_, pid)) = orphan {
+                    runtime_manager::terminate_pid(*pid);
+                }
+                if config.auto_start || orphan.is_some() {
+                    if let Err(error) = manager.start(config) {
+                        state
+                            .lock()
+                            .unwrap()
+                            .instances
+                            .iter_mut()
+                            .find(|c| c.id == config.id)
+                            .map(|c| c.last_error = Some(error));
+                    }
                 }
             }
         }
@@ -192,13 +284,15 @@ mod windows_service {
             let runtime3 = runtime.clone();
             let lock3 = update_lock.clone();
             let stopped3 = stopped_for_ipc.clone();
-            std::thread::spawn(move || watchdog(state3, runtime3, lock3, stopped3));
+            let logger3 = logger.clone();
+            std::thread::spawn(move || watchdog(state3, runtime3, lock3, stopped3, logger3));
         }
         let state2 = state.clone();
         let runtime2 = runtime.clone();
         let tasks2 = tasks.clone();
         let lock2 = update_lock.clone();
         let stopped2 = stopped_for_ipc.clone();
+        let logger2 = logger.clone();
         std::thread::spawn(move || {
             let _ = ipc::serve(
                 move |request| {
@@ -210,6 +304,7 @@ mod windows_service {
                         &tasks2,
                         &lock2,
                         &stopped2,
+                        &logger2,
                     )
                 },
                 &interactive_sid,
@@ -219,6 +314,7 @@ mod windows_service {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         runtime.lock().unwrap().stop_all();
+        service_log(&logger, "INFO", "EasyTierService stopped");
         status_handle
             .set_service_status(ServiceStatus {
                 service_type: ServiceType::OWN_PROCESS,
@@ -255,11 +351,11 @@ mod windows_service {
         std::path::PathBuf::from("core/easytier-core.exe")
     }
 
-    /// Kill orphaned easytier-core.exe processes still running with a managed
-    /// instance's staged config (`%TEMP%\easytier-{id}.toml`). Returns the ids
-    /// that had an orphan. These hold the instance's ports and would make a
-    /// clean restart impossible.
-    fn sweep_orphan_cores(instance_ids: &[String]) -> Vec<String> {
+    /// Find orphaned easytier-core.exe processes still running with a managed
+    /// instance's staged config (`%TEMP%\easytier-{id}.toml`). Returns
+    /// (instance id, pid) pairs. Orphans prove the network was running when
+    /// the service died.
+    fn find_orphan_cores(instance_ids: &[String]) -> Vec<(String, u32)> {
         if instance_ids.is_empty() {
             return Vec::new();
         }
@@ -271,8 +367,7 @@ mod windows_service {
         let script = format!(
             "$p = Get-CimInstance Win32_Process -Filter \"Name='easytier-core.exe'\" | \
              Where-Object {{ $_.CommandLine -match '{pattern}' }}; \
-             $p | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}; \
-             $p | ForEach-Object {{ if ($_.CommandLine -match 'easytier-([^\\']+?)\\.toml') {{ $Matches[1] }} }}"
+             $p | ForEach-Object {{ if ($_.CommandLine -match 'easytier-([^\\']+?)\\.toml') {{ \"$($Matches[1]) $($_.ProcessId)\" }} }}"
         );
         let mut command = std::process::Command::new("powershell.exe");
         command
@@ -285,11 +380,16 @@ mod windows_service {
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default();
-        let mut found: Vec<String> = Vec::new();
+        let mut found: Vec<(String, u32)> = Vec::new();
         for line in output.lines() {
-            let id = line.trim();
-            if !id.is_empty() && instance_ids.iter().any(|k| k == id) && !found.iter().any(|f| f == id) {
-                found.push(id.to_string());
+            let mut parts = line.trim().split_whitespace();
+            let (Some(id), Some(pid)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            if let Ok(pid) = pid.parse::<u32>() {
+                if instance_ids.iter().any(|k| k == id) && !found.iter().any(|f| &f.0 == id) {
+                    found.push((id.to_string(), pid));
+                }
             }
         }
         found
@@ -309,6 +409,7 @@ mod windows_service {
         runtime: Arc<Mutex<runtime_manager::RuntimeManager>>,
         update_lock: Arc<Mutex<bool>>,
         stopped: Arc<Mutex<bool>>,
+        logger: ServiceLogger,
     ) {
         use config_store::DesiredState;
         #[derive(Default)]
@@ -332,7 +433,7 @@ mod windows_service {
                     .collect()
             };
             for cfg in desired {
-                if runtime.lock().unwrap().children.contains_key(&cfg.id) {
+                if runtime.lock().unwrap().instance_running(&cfg.id) {
                     track.remove(&cfg.id);
                     continue;
                 }
@@ -348,10 +449,36 @@ mod windows_service {
                 if t.last_attempt.map_or(false, |at| now.duration_since(at) < RESTART_MIN_INTERVAL) {
                     continue;
                 }
-                sweep_orphan_cores(std::slice::from_ref(&cfg.id));
+                // Re-check desired_state and start while holding the state
+                // lock (same lock order as IPC dispatch: state → runtime).
+                // Otherwise a manual stop landing between this pass's snapshot
+                // and the restart would be undone: the user's stop sets
+                // desired_state=Stopped before killing the core, so holding
+                // the lock across check+start makes the pair atomic.
+                let s = state.lock().unwrap();
+                if !s
+                    .instances
+                    .iter()
+                    .any(|c| c.id == cfg.id && c.desired_state == DesiredState::Running)
+                {
+                    track.remove(&cfg.id);
+                    continue;
+                }
+                // A core we do not own may still hold the instance's ports
+                // (e.g. left by a compat-mode GUI start); take it down first.
+                if let Some((_, pid)) = find_orphan_cores(std::slice::from_ref(&cfg.id))
+                    .into_iter()
+                    .next()
+                {
+                    runtime_manager::terminate_pid(pid);
+                }
                 let mut r = runtime.lock().unwrap();
                 if let Err(e) = r.start(&cfg) {
+                    let message = format!("watchdog recovery failed for {}: {e}", cfg.id);
                     r.errors.insert(cfg.id.clone(), format!("自动恢复失败: {e}"));
+                    service_log(&logger, "ERROR", message);
+                } else {
+                    service_log(&logger, "WARN", format!("watchdog recovered instance {}", cfg.id));
                 }
                 t.last_attempt = Some(now);
                 t.misses += 1;
@@ -374,17 +501,20 @@ mod windows_service {
         tasks: &Tasks,
         update_lock: &Arc<Mutex<bool>>,
         stopped_opt: &Arc<Mutex<bool>>,
+        logger: &ServiceLogger,
     ) -> ipc::Response {
         if req.protocol_version != ipc::PROTOCOL_VERSION {
             return ipc::error(&req, "invalid_request", "unsupported protocol version");
         }
-        let result = dispatch(&req, state, runtime, tasks, update_lock, stopped_opt);
+        let result = dispatch(&req, state, runtime, tasks, update_lock, stopped_opt, logger);
         let response = match result {
             Ok(v) => ipc::response(&req, v),
             Err((c, m)) => ipc::error(&req, c, m),
         };
         if response.ok {
             let _ = config_store::save(path, &state.lock().unwrap());
+        } else if let Some(error) = &response.error {
+            service_log(logger, "ERROR", format!("IPC {} failed: {}", req.command, error.message));
         }
         response
     }
@@ -396,9 +526,11 @@ mod windows_service {
         tasks: &Tasks,
         update_lock: &Arc<Mutex<bool>>,
         stopped_opt: &Arc<Mutex<bool>>,
+        logger: &ServiceLogger,
     ) -> Result<serde_json::Value, (&'static str, String)> {
         use config_store::DesiredState;
         let mut s = state.lock().unwrap();
+        service_log(logger, "INFO", format!("IPC request: {}", req.command));
         if *update_lock.lock().unwrap()
             && matches!(
                 req.command.as_str(),
@@ -468,7 +600,7 @@ mod windows_service {
                     .and_then(|v| v.as_str())
                     .ok_or(("invalid_request", "missing instance_id".into()))?;
                 if let Some(pos) = s.instances.iter().position(|x| x.id == id) {
-                    if runtime.lock().unwrap().children.contains_key(id) {
+                    if runtime.lock().unwrap().instance_running(id) {
                         return Err(("busy", "instance is running".into()));
                     }
                     s.instances.remove(pos);
@@ -495,6 +627,7 @@ mod windows_service {
                     .ok_or(("instance_not_found", "instance not found".into()))?;
                 if req.command == "start_instance" {
                     c.desired_state = DesiredState::Running;
+                    service_log(logger, "INFO", format!("starting instance {}", c.id));
                     runtime
                         .lock()
                         .unwrap()
@@ -510,6 +643,7 @@ mod windows_service {
                     }
                 } else {
                     c.desired_state = DesiredState::Stopped;
+                    service_log(logger, "INFO", format!("stopping instance {}", c.id));
                     runtime
                         .lock()
                         .unwrap()
@@ -521,7 +655,7 @@ mod windows_service {
             "stop_all_instances" => {
                 for c in s.instances.iter_mut() {
                     if c.desired_state == DesiredState::Running
-                        || runtime.lock().unwrap().children.contains_key(&c.id)
+                        || runtime.lock().unwrap().instance_running(&c.id)
                     {
                         c.desired_state = DesiredState::Stopped;
                         let _ = runtime.lock().unwrap().stop(c);
@@ -535,13 +669,14 @@ mod windows_service {
             "shutdown_service" => {
                 for c in s.instances.iter_mut() {
                     if c.desired_state == DesiredState::Running
-                        || runtime.lock().unwrap().children.contains_key(&c.id)
+                        || runtime.lock().unwrap().instance_running(&c.id)
                     {
                         c.desired_state = DesiredState::Stopped;
                         let _ = runtime.lock().unwrap().stop(c);
                     }
                 }
                 *stopped_opt.lock().unwrap() = true;
+                service_log(logger, "INFO", "service shutdown requested");
                 Ok(serde_json::json!({"shutdown": true}))
             }
             "set_auto_start" => {
@@ -748,7 +883,7 @@ mod windows_service {
         let configs = state.lock().unwrap().instances.clone();
         let running: Vec<_> = configs
             .iter()
-            .filter(|c| runtime.lock().unwrap().children.contains_key(&c.id))
+            .filter(|c| runtime.lock().unwrap().instance_running(&c.id))
             .cloned()
             .collect();
         set_task(

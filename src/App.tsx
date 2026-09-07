@@ -10,6 +10,7 @@ import easytierLogo from './assets/easytier-logo.png';
 
 
 import { getServiceStatus, serviceRequest, ServiceInstanceState, ServiceStatus } from './service-client';
+import { DialogHost, appAlert, appConfirm } from './dialogs';
 
 type Status = 'running' | 'stopped' | 'starting' | 'stopping' | 'failed';
 type Tab = 'status' | 'peers' | 'routes' | 'config' | 'logs' | 'settings';
@@ -60,6 +61,13 @@ const KERNEL_PROXIES = [
   { value: 'https://cdn.gh-proxy.org', label: 'https://cdn.gh-proxy.org/' },
   { value: 'https://edgeone.gh-proxy.org', label: 'https://edgeone.gh-proxy.org/' },
 ];
+
+type ServiceRecoveryStep = 'starting' | 'waiting' | 'syncing';
+const SERVICE_RECOVERY_TEXT: Record<ServiceRecoveryStep, string> = {
+  starting: '正在重新拉起后台服务…',
+  waiting: '服务已启动，等待就绪…',
+  syncing: '服务已就绪，正在同步网络状态…',
+};
 
 const KERNEL_PHASE_TEXT: Record<string, string> = {
   checking: '检查版本', downloading: '下载内核', extracting: '校验并解压', stopping: '停止网络', installing: '替换内核', restarting: '恢复网络', completed: '更新完成', failed: '更新失败',
@@ -189,7 +197,7 @@ export default function App() {
         }
         return;
       }
-      const next = await getServiceStatus();
+      const next = await withScmGuardedStatus();
       setService({ ...next, installed: true, running: true });
       if (next.running && next.healthy !== false) {
         const states = await serviceRequest<ServiceInstanceState[]>('list_instances');
@@ -199,34 +207,90 @@ export default function App() {
         }));
       }
     } catch (e) {
+      // SCM says the service is up but IPC keeps failing: a hiccup, not a
+      // dead service — flipping to compatibility mode (and reinstalling the
+      // service) here is what used to report "服务不可用" out of nowhere.
+      const sc = await invoke<{ installed: boolean; running: boolean }>('query_service_installation').catch(() => null);
+      if (sc?.installed && sc?.running) {
+        setService({ installed: true, running: true, healthy: true, message: '后台服务短暂无响应，正在自动重试…' });
+        return;
+      }
       setService({ installed: false, running: false, message: String(e) });
     }
+  };
+  // service_status via the named pipe, retried while SCM still reports the
+  // service RUNNING — the pipe can transiently have no listening instance.
+  const withScmGuardedStatus = async (): Promise<ServiceStatus> => {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await getServiceStatus();
+      } catch (e) {
+        lastError = e;
+        const sc = await invoke<{ installed: boolean; running: boolean }>('query_service_installation').catch(() => null);
+        if (!sc?.installed || !sc?.running) throw e;
+        await new Promise(r => setTimeout(r, 800));
+      }
+    }
+    throw lastError;
   };
   useEffect(() => { void refreshService(); }, []);
 
   // Self-heal: the resident service can die while the GUI stays open (crash,
-  // manual sc stop). Poll its health every 20s; if it is down, start it again
-  // (rate-limited to one attempt per minute) and resync instance state. The
-  // service's own startup logic restores every network that was running.
+  // manual sc stop). Poll its health every 20s; on failure, surface a
+  // "重新拉起服务" progress banner and run a staged recovery: start the
+  // service (one attempt per minute), wait for RUNNING, then resync instance
+  // state. The service adopts still-running networks as-is — it never
+  // restarts healthy ones.
+  const [serviceRecovery, setServiceRecovery] = useState<ServiceRecoveryStep | null>(null);
+  const recoveryRef = useRef(false);
   const lastServiceHealAt = useRef(0);
+  const runServiceRecovery = async () => {
+    if (recoveryRef.current) return;
+    recoveryRef.current = true;
+    setServiceRecovery('starting');
+    setService(s => (s ? { ...s, running: false, message: '检测到后台服务异常退出，正在自动重新拉起…' } : s));
+    try {
+      await invoke('start_service');
+      setServiceRecovery('waiting');
+      let ready = false;
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        try {
+          const q = await invoke<{ installed: boolean; running: boolean }>('query_service_installation');
+          if (q.installed && q.running) { ready = true; break; }
+        } catch { /* SCM hiccup — keep waiting */ }
+      }
+      if (!ready) {
+        setService({ installed: true, running: false, message: '后台服务自动恢复超时，可在设置中重试或修复。' });
+        return;
+      }
+      setServiceRecovery('syncing');
+      await refreshService({ skipAutoStart: true });
+    } catch (e) {
+      setService({ installed: true, running: false, message: `后台服务自动恢复失败：${String(e)}（可在设置中重试或修复）` });
+    } finally {
+      recoveryRef.current = false;
+      setServiceRecovery(null);
+    }
+  };
   useEffect(() => {
     if (!service?.installed) return;
     const timer = window.setInterval(async () => {
-      if (document.hidden) return;
-      let running = true;
+      if (document.hidden || recoveryRef.current) return;
       try {
         const q = await invoke<{ installed: boolean; running: boolean }>('query_service_installation');
-        running = q.running;
-        if (q.installed && !q.running && Date.now() - lastServiceHealAt.current > 60_000) {
-          lastServiceHealAt.current = Date.now();
-          setService(s => (s ? { ...s, running: false, message: '后台服务掉线，正在自动恢复…' } : s));
-          await invoke('start_service');
-          await new Promise(r => setTimeout(r, 1500));
+        if (q.installed && !q.running) {
+          setService(s => (s ? { ...s, running: false, message: '后台服务掉线，正在准备自动恢复…' } : s));
+          if (Date.now() - lastServiceHealAt.current > 60_000) {
+            lastServiceHealAt.current = Date.now();
+            void runServiceRecovery();
+          }
         }
-      } catch { running = false; }
-      if (!running) void refreshService({ skipAutoStart: true });
+      } catch { /* sc query hiccup — the next tick retries */ }
     }, 20_000);
     return () => { clearInterval(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [service?.installed]);
 
   const normalizeNetworkLogs = (value: string[] | string | { text?: string } | null | undefined): string[] => {
@@ -462,7 +526,7 @@ export default function App() {
     if (!running && !serviceMode && isElevated === false && !elevationNoticeShown) {
       const message = '当前为普通权限运行，兼容模式启动网络可能失败。请右键客户端并选择“以管理员身份运行”。';
       addLog(`权限提示：${message}`);
-      alert(message);
+      await appAlert(message);
       sessionStorage.setItem('easytier.elevation-notice.v1', '1');
       setElevationNoticeShown(true);
     }
@@ -491,7 +555,7 @@ export default function App() {
       }
       const all = [...new Set([...conflicts, ...systemConflicts])];
       if (all.length) {
-        if (!confirm(`监听器端口冲突：\n\n${all.join('\n')}\n\n建议修改本实例监听器端口（或改用端口 0 自动分配）后再启动。仍要继续吗？`)) return;
+        if (!(await appConfirm(`监听器端口冲突：\n\n${all.join('\n')}\n\n建议修改本实例监听器端口（或改用端口 0 自动分配）后再启动。仍要继续吗？`))) return;
       }
       // TUN adapter names must be unique machine-wide: two cores claiming the
       // same dev_name fight over one Wintun adapter (no IP, route flapping).
@@ -554,7 +618,7 @@ export default function App() {
     } catch (e) {
       setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, status: 'failed' } : i)));
       addLog(`[${current.name}] 操作失败：${String(e)}`);
-      alert(`网络操作失败：${String(e)}`);
+      await appAlert(`网络操作失败：${String(e)}`);
       // Refresh state so a self-exited core transitions out of "failed" cleanly.
       invoke('get_instance_state', { id: current.id }).catch(() => undefined);
     }
@@ -572,17 +636,17 @@ export default function App() {
       if (sameListeners) config.listener_urls = listenersForInstance(instances.indexOf(current) === 0 ? 0 : instances.indexOf(current));
       patchConfig(config);
       addLog(`TOML 配置导入成功（监听器 ${config.listener_urls.join(', ')}）`);
-      alert(`配置导入成功\n\n监听器：${config.listener_urls.join('\n')}\n\n若与其它实例端口冲突，请在监听器列表中修改端口后重新启动网络。`);
+      await appAlert(`配置导入成功\n\n监听器：${config.listener_urls.join('\n')}\n\n若与其它实例端口冲突，请在监听器列表中修改端口后重新启动网络。`);
     } catch (e) {
       addLog(`TOML 导入失败：${String(e)}`);
-      alert(`导入失败：${String(e)}`);
+      await appAlert(`导入失败：${String(e)}`);
     }
   };
 
   const exportToml = async (copy = false) => {
     const hasSecret = !!current.config.network_secret;
     if (copy && hasSecret && !secretVisible) {
-      if (!confirm('配置中包含网络密钥，确定复制到剪贴板吗？')) return;
+      if (!(await appConfirm('配置中包含网络密钥，确定复制到剪贴板吗？'))) return;
     }
     const text = encodeTOML(current.config, true);
     try {
@@ -595,7 +659,7 @@ export default function App() {
         URL.revokeObjectURL(a.href);
       }
       addLog(copy ? 'TOML 已复制到剪贴板' : 'TOML 已导出为文件');
-    } catch (e) { alert(`导出失败：${String(e)}`); }
+    } catch (e) { await appAlert(`导出失败：${String(e)}`); }
   };
 
   const openTomlFile = async () => {
@@ -644,7 +708,7 @@ export default function App() {
   const updateKernel = async () => {
     if (kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)) return;
     if (!kernelInfo?.update_available) return;
-    if (!confirm(`将更新 EasyTier 内核至 v${kernelInfo.latest_version}，更新期间会停止并自动重启当前运行中的网络。继续吗？`)) return;
+    if (!(await appConfirm(`将更新 EasyTier 内核至 v${kernelInfo.latest_version}，更新期间会停止并自动重启当前运行中的网络。继续吗？`))) return;
     const runningInstances = instances.filter(i => i.status === 'running').map(i => ({ id: i.id, config: encodeTOML(i.config), rpc_port: i.rpcPort, remote_manage_enabled: i.remoteManageEnabled ?? false, rpc_whitelist_cidrs: i.rpcWhitelistCidrs ?? [] }));
     setKernelUpdate({ phase: 'checking', downloaded_bytes: 0, total_bytes: null, percent: 0, message: '正在准备更新' });
     try {
@@ -681,7 +745,16 @@ export default function App() {
   const navItems: [Tab, string][] = [['status', '状态总览'], ['peers', '组网成员'], ['routes', '路由信息'], ['config', '组网配置'], ['logs', '运行日志'], ['settings', '设置']];
 
   return (
-    <main className="app-shell">
+    <>
+      <DialogHost />
+      <main className="app-shell">
+      {serviceRecovery && (
+        <div className="kernel-progress-global">
+          <div className="kernel-progress-head"><strong>后台服务恢复</strong><span>{SERVICE_RECOVERY_TEXT[serviceRecovery]}</span></div>
+          <div className="kernel-progress-track"><div className="kernel-progress-bar indeterminate" /></div>
+          <small>恢复期间正常运行中的网络不会被重启；服务就绪后将直接接管并同步状态。</small>
+        </div>
+      )}
       {kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase) && (
         <div className="kernel-progress-global">
           <div className="kernel-progress-head"><strong>EasyTier 内核更新</strong><span>{KERNEL_PHASE_TEXT[kernelUpdate.phase] || kernelUpdate.phase}</span></div>
@@ -891,7 +964,7 @@ export default function App() {
                 {configSaved && <span className="save-status" role="status">✓ 已自动保存</span>}
               <div className="title-actions">
                 <button className="ghost" onClick={() => void openTomlFile()}><IconUpload size={13} /> 导入 TOML</button>
-                <button className="ghost" onClick={async () => { try { await importToml(await navigator.clipboard.readText()); } catch (e) { alert(`读取剪贴板失败：${String(e)}`); } }}><IconClipboard size={13} /> 剪贴板导入</button>
+                <button className="ghost" onClick={async () => { try { await importToml(await navigator.clipboard.readText()); } catch (e) { await appAlert(`读取剪贴板失败：${String(e)}`); } }}><IconClipboard size={13} /> 剪贴板导入</button>
                 <button className="ghost" onClick={() => void exportToml()}><IconDownload size={13} /> 导出 TOML</button>
                 <button className="ghost" onClick={() => void exportToml(true)}><IconCopy size={13} /> 复制</button>
                 <button className="mini-button danger" onClick={() => removeInstance(current.id)}><IconTrash size={12} /> 删除实例</button>
@@ -941,7 +1014,7 @@ export default function App() {
               {serviceResult && <p className={serviceResult.ok ? 'hint' : 'list-empty err'} style={{ marginTop: 6 }}>{serviceResult.ok ? '✓ ' : '✗ '}{serviceResult.text}</p>}
               <div className="service-actions">
                 {!service?.installed && <button className="primary" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); setServiceResult(null); try { await invoke('install_service'); setServiceResult({ ok: true, text: '后台服务已安装并启动。' }); await refreshService({ skipAutoStart: true }); } catch (e) { setServiceResult({ ok: false, text: `安装服务失败：${String(e)}` }); } finally { setServiceBusy(false); } }}>{serviceBusy ? '正在安装…' : '安装后台服务'}</button>}
-                {service?.installed && !service?.running && <button className="primary" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await invoke('start_service'); await refreshService(); } catch (e) { alert(`启动服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>启动服务</button>}
+                {service?.installed && !service?.running && <button className="primary" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); try { await invoke('start_service'); await refreshService(); } catch (e) { await appAlert(`启动服务失败：${String(e)}`); } finally { setServiceBusy(false); } }}>启动服务</button>}
                 {service?.installed && <button className="ghost" disabled={serviceBusy} onClick={async () => { setServiceBusy(true); setServiceResult(null); try { await invoke('repair_service'); setServiceResult({ ok: true, text: '后台服务已修复并启动。' }); await refreshService(); } catch (e) { setServiceResult({ ok: false, text: `修复服务失败：${String(e)}` }); } finally { setServiceBusy(false); } }}>修复服务</button>}
               </div>
             </div>
@@ -989,7 +1062,7 @@ export default function App() {
                         <span className="hint-inline">{i.status === 'running' ? '运行中' : '已停止'}</span>
                         <button className={i.autoStart ? 'switch on' : 'switch'} role="switch" aria-checked={i.autoStart ?? false} title="开机自动启动" onClick={async () => {
                           const next = !(i.autoStart ?? false);
-                          if (serviceMode) { try { await serviceRequest('set_auto_start', { instance_id: i.id, auto_start: next }); } catch (e) { alert(`更新自动启动失败：${String(e)}`); return; } }
+                          if (serviceMode) { try { await serviceRequest('set_auto_start', { instance_id: i.id, auto_start: next }); } catch (e) { await appAlert(`更新自动启动失败：${String(e)}`); return; } }
                           setInstances(xs => xs.map(x => x.id === i.id ? { ...x, autoStart: next } : x));
                         }}><span className="knob" /></button><span className="hint-inline">自动启动</span>
                         <button className={i.remoteManageEnabled ? 'switch on' : 'switch'} role="switch" aria-checked={i.remoteManageEnabled ?? false}
@@ -1024,5 +1097,6 @@ export default function App() {
         )}
       </section>
     </main>
+    </>
   );
 }

@@ -5,6 +5,12 @@ use std::{
 };
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_MESSAGE: usize = 1024 * 1024;
+/// Number of named-pipe instances served concurrently. The GUI opens a fresh
+/// connection per request (health poll, status poll, log poll and user
+/// actions overlap), so a single-instance accept loop rejects every overlapped
+/// request with "pipe busy" and leaves gaps between connections where the
+/// pipe name briefly does not exist — both surface as "service unavailable".
+pub const PIPE_INSTANCES: u32 = 8;
 #[derive(Debug, Deserialize)]
 pub struct Request {
     pub protocol_version: u32,
@@ -84,7 +90,7 @@ pub fn write_response<W: Write>(writer: &mut W, response: &Response) -> Result<(
 // multi-megabyte log reads) for the life of the service process.
 #[cfg(windows)]
 mod windows_security {
-    use super::MAX_MESSAGE;
+    use super::{MAX_MESSAGE, PIPE_INSTANCES};
     use std::{
         fs::File,
         mem::size_of,
@@ -184,7 +190,7 @@ mod windows_security {
                 wide(r"\\.\pipe\EasyTierService").as_ptr(),
                 PIPE_ACCESS_DUPLEX,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                1,
+                PIPE_INSTANCES,
                 MAX_MESSAGE as u32,
                 MAX_MESSAGE as u32,
                 0,
@@ -304,28 +310,53 @@ mod windows_security {
 }
 
 #[cfg(windows)]
-pub fn serve<F>(mut handler: F, interactive_sid: &str) -> Result<(), String>
+pub fn serve<F>(handler: F, interactive_sid: &str) -> Result<(), String>
 where
-    F: FnMut(Request) -> Response,
+    F: Fn(Request) -> Response + Send + Sync + 'static,
 {
     windows_security::validate_sid(interactive_sid)?;
-    loop {
-        let mut pipe = windows_security::create_pipe(interactive_sid)?;
-        windows_security::connect(&pipe)?;
-        if !windows_security::allowed(&pipe, interactive_sid)? {
-            continue;
-        }
-        let mut reader = BufReader::new(&mut pipe);
-        loop {
-            match read_request(&mut reader) {
-                Ok(req) => {
-                    let resp = handler(req);
-                    write_response(reader.get_mut(), &resp)?;
+    let handler = std::sync::Arc::new(handler);
+    // One accept loop per pipe instance: each loop re-creates its instance
+    // immediately after the previous client disconnects, and up to
+    // PIPE_INSTANCES clients can be served (or waiting to connect) at once.
+    let mut threads = Vec::new();
+    for _ in 0..PIPE_INSTANCES {
+        let handler = handler.clone();
+        let sid = interactive_sid.to_string();
+        threads.push(std::thread::spawn(move || loop {
+            let mut pipe = match windows_security::create_pipe(&sid) {
+                Ok(pipe) => pipe,
+                // Transient (e.g. the previous instance handle is not fully
+                // released yet): retry instead of taking IPC down for good.
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    continue;
                 }
-                Err(_) => break,
+            };
+            if windows_security::connect(&pipe).is_err() {
+                continue;
             }
-        }
+            if !windows_security::allowed(&pipe, &sid).unwrap_or(false) {
+                continue;
+            }
+            let mut reader = BufReader::new(&mut pipe);
+            loop {
+                match read_request(&mut reader) {
+                    Ok(req) => {
+                        let resp = handler(req);
+                        if write_response(reader.get_mut(), &resp).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }));
     }
+    for thread in threads {
+        let _ = thread.join();
+    }
+    Ok(())
 }
 #[cfg(not(windows))]
 pub fn serve<F>(_handler: F) -> Result<(), String>

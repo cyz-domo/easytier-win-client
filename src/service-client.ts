@@ -52,7 +52,30 @@ export interface ServiceInstanceState {
   rpc_whitelist_cidrs?: string[];
 }
 
-export async function serviceRequest<TData = unknown, TPayload = Record<string, unknown>>(
+export async function serviceRequest<TData = unknown, TPayload extends Record<string, unknown> = Record<string, unknown>>(
+  command: ServiceCommand,
+  payload = {} as TPayload,
+): Promise<TData> {
+  // The named pipe briefly has no listening instance between service-side
+  // connections, so a fresh connect can fail with "service unavailable" even
+  // while the service is healthy (health poll, status poll and user actions
+  // overlap constantly). A connect-level failure never reached the service,
+  // so retrying is safe for every command.
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await rawServiceRequest<TData, TPayload>(command, payload);
+    } catch (e) {
+      lastError = e;
+      const text = String(e);
+      if (!text.startsWith('service_unavailable') || attempt === 2) throw e;
+      await new Promise(r => setTimeout(r, 600));
+    }
+  }
+  throw lastError;
+}
+
+async function rawServiceRequest<TData = unknown, TPayload extends Record<string, unknown> = Record<string, unknown>>(
   command: ServiceCommand,
   payload = {} as TPayload,
 ): Promise<TData> {
