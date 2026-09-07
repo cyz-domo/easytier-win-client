@@ -835,6 +835,22 @@ fn quit_and_stop_networks(app: &tauri::AppHandle) {
             }
         }
         send("shutdown_service");
+        // The GUI may be closing while the service pipe is already gone. As a
+        // final safety net, terminate only cores whose executable lives under
+        // this installation directory; never kill unrelated EasyTier copies.
+        if let Some(root) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_string_lossy().replace('\'', "''")))
+        {
+            let script = format!(
+                "$root = [IO.Path]::GetFullPath('{}').TrimEnd('\\'); Get-CimInstance Win32_Process -Filter \"Name='easytier-core.exe'\" | Where-Object {{ $_.ExecutablePath -like \"$root*\" }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}",
+                root
+            );
+            let _ = Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
+                .creation_flags(0x08000000)
+                .output();
+        }
     }
     app.exit(0);
 }

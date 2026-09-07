@@ -17,10 +17,19 @@
   ; START_PENDING and avoids passing the whole sc.exe output as a PID.
   FileOpen $1 "$PLUGINSDIR\stop-service.ps1" w
   FileWrite $1 "$$s = Get-CimInstance Win32_Service | Where-Object Name -eq 'EasyTierService' | Select-Object -First 1$\r$\n"
-  FileWrite $1 "if ($$s -and $$s.ProcessId -gt 0) { Stop-Process -Id $$s.ProcessId -Force -ErrorAction SilentlyContinue }$\r$\n"
+  FileWrite $1 "if ($$s -and $$s.ProcessId -gt 0) { for ($$i=0; $$i -lt 20; $$i++) { Start-Sleep -Milliseconds 500; $$state = (Get-CimInstance Win32_Service -Filter \"Name='EasyTierService'\").State; if ($$state -eq 'Stopped') { exit } }; Stop-Process -Id $$s.ProcessId -Force -ErrorAction SilentlyContinue }$\r$\n"
   FileClose $1
   nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\stop-service.ps1"'
   Pop $0
+  ; Kill any core launched from this installation before NSIS overwrites
+  ; WinDivert64.sys and related runtime files.
+  FileOpen $1 "$PLUGINSDIR\stop-cores.ps1" w
+  FileWrite $1 "$$root = [IO.Path]::GetFullPath('$INSTDIR').TrimEnd('\')$\r$\n"
+  FileWrite $1 "Get-CimInstance Win32_Process -Filter \"Name='easytier-core.exe'\" | Where-Object { $$_.ExecutablePath -like \"$$root*\" } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }$\r$\n"
+  FileClose $1
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\stop-cores.ps1"'
+  Pop $0
+  Sleep 1500
   ; Retry delete and confirm the SCM entry is gone before continuing.
   StrCpy $1 0
   service_delete_loop:
