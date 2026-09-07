@@ -158,9 +158,19 @@ mod windows_service {
         {
             let configs = state.lock().unwrap().instances.clone();
             let mut manager = runtime.lock().unwrap();
+            // A crashed service leaves its core children alive (orphaned but
+            // still holding the ports). An orphan is proof the network was
+            // running when the service died, so restore it even without
+            // auto_start; a clean boot only starts auto_start instances.
+            let orphaned = sweep_orphan_cores(
+                &configs.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+            );
             for config in configs
                 .iter()
-                .filter(|c| c.auto_start && c.desired_state == config_store::DesiredState::Running)
+                .filter(|c| {
+                    c.desired_state == config_store::DesiredState::Running
+                        && (c.auto_start || orphaned.contains(&c.id))
+                })
             {
                 if let Err(error) = manager.start(config) {
                     state
@@ -175,6 +185,15 @@ mod windows_service {
         }
         let tasks: Tasks = Arc::new(Mutex::new(HashMap::new()));
         let update_lock = Arc::new(Mutex::new(false));
+        // Watchdog: while the service runs, bring back any network whose core
+        // died (crash, OOM kill) instead of just reporting it as stopped.
+        {
+            let state3 = state.clone();
+            let runtime3 = runtime.clone();
+            let lock3 = update_lock.clone();
+            let stopped3 = stopped_for_ipc.clone();
+            std::thread::spawn(move || watchdog(state3, runtime3, lock3, stopped3));
+        }
         let state2 = state.clone();
         let runtime2 = runtime.clone();
         let tasks2 = tasks.clone();
@@ -234,6 +253,117 @@ mod windows_service {
             }
         }
         std::path::PathBuf::from("core/easytier-core.exe")
+    }
+
+    /// Kill orphaned easytier-core.exe processes still running with a managed
+    /// instance's staged config (`%TEMP%\easytier-{id}.toml`). Returns the ids
+    /// that had an orphan. These hold the instance's ports and would make a
+    /// clean restart impossible.
+    fn sweep_orphan_cores(instance_ids: &[String]) -> Vec<String> {
+        if instance_ids.is_empty() {
+            return Vec::new();
+        }
+        let pattern = instance_ids
+            .iter()
+            .map(|id| format!("easytier-{id}\\.toml"))
+            .collect::<Vec<_>>()
+            .join("|");
+        let script = format!(
+            "$p = Get-CimInstance Win32_Process -Filter \"Name='easytier-core.exe'\" | \
+             Where-Object {{ $_.CommandLine -match '{pattern}' }}; \
+             $p | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}; \
+             $p | ForEach-Object {{ if ($_.CommandLine -match 'easytier-([^\\']+?)\\.toml') {{ $Matches[1] }} }}"
+        );
+        let mut command = std::process::Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut command, 0x08000000);
+        let output = command
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        let mut found: Vec<String> = Vec::new();
+        for line in output.lines() {
+            let id = line.trim();
+            if !id.is_empty() && instance_ids.iter().any(|k| k == id) && !found.iter().any(|f| f == id) {
+                found.push(id.to_string());
+            }
+        }
+        found
+    }
+
+    const WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_secs(10);
+    const RESTART_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+    const RESTART_MAX_MISSES: u32 = 8;
+    const RESTART_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// Recover networks whose core process disappeared while
+    /// `desired_state` stayed Running. Attempts are throttled and a run of
+    /// consecutive failures enters a cooldown so a crashing core cannot turn
+    /// into an unbounded restart loop.
+    fn watchdog(
+        state: Arc<Mutex<config_store::ServiceState>>,
+        runtime: Arc<Mutex<runtime_manager::RuntimeManager>>,
+        update_lock: Arc<Mutex<bool>>,
+        stopped: Arc<Mutex<bool>>,
+    ) {
+        use config_store::DesiredState;
+        #[derive(Default)]
+        struct Track {
+            last_attempt: Option<std::time::Instant>,
+            misses: u32,
+            cooldown_until: Option<std::time::Instant>,
+        }
+        let mut track: HashMap<String, Track> = HashMap::new();
+        while !*stopped.lock().unwrap() {
+            std::thread::sleep(WATCHDOG_TICK);
+            if *stopped.lock().unwrap() || *update_lock.lock().unwrap() {
+                continue;
+            }
+            let desired: Vec<config_store::InstanceConfig> = {
+                let s = state.lock().unwrap();
+                s.instances
+                    .iter()
+                    .filter(|c| c.desired_state == DesiredState::Running)
+                    .cloned()
+                    .collect()
+            };
+            for cfg in desired {
+                if runtime.lock().unwrap().children.contains_key(&cfg.id) {
+                    track.remove(&cfg.id);
+                    continue;
+                }
+                let now = std::time::Instant::now();
+                let t = track.entry(cfg.id.clone()).or_default();
+                if let Some(until) = t.cooldown_until {
+                    if now < until {
+                        continue;
+                    }
+                    t.cooldown_until = None;
+                    t.misses = 0;
+                }
+                if t.last_attempt.map_or(false, |at| now.duration_since(at) < RESTART_MIN_INTERVAL) {
+                    continue;
+                }
+                sweep_orphan_cores(std::slice::from_ref(&cfg.id));
+                let mut r = runtime.lock().unwrap();
+                if let Err(e) = r.start(&cfg) {
+                    r.errors.insert(cfg.id.clone(), format!("自动恢复失败: {e}"));
+                }
+                t.last_attempt = Some(now);
+                t.misses += 1;
+                if t.misses >= RESTART_MAX_MISSES {
+                    r.errors.insert(
+                        cfg.id.clone(),
+                        format!("自动恢复连续 {} 次未成功，暂停 10 分钟后重试", t.misses),
+                    );
+                    t.cooldown_until = Some(now + RESTART_COOLDOWN);
+                }
+            }
+        }
     }
 
     fn handle(

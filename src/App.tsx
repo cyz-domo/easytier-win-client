@@ -204,6 +204,31 @@ export default function App() {
   };
   useEffect(() => { void refreshService(); }, []);
 
+  // Self-heal: the resident service can die while the GUI stays open (crash,
+  // manual sc stop). Poll its health every 20s; if it is down, start it again
+  // (rate-limited to one attempt per minute) and resync instance state. The
+  // service's own startup logic restores every network that was running.
+  const lastServiceHealAt = useRef(0);
+  useEffect(() => {
+    if (!service?.installed) return;
+    const timer = window.setInterval(async () => {
+      if (document.hidden) return;
+      let running = true;
+      try {
+        const q = await invoke<{ installed: boolean; running: boolean }>('query_service_installation');
+        running = q.running;
+        if (q.installed && !q.running && Date.now() - lastServiceHealAt.current > 60_000) {
+          lastServiceHealAt.current = Date.now();
+          setService(s => (s ? { ...s, running: false, message: '后台服务掉线，正在自动恢复…' } : s));
+          await invoke('start_service');
+          await new Promise(r => setTimeout(r, 1500));
+        }
+      } catch { running = false; }
+      if (!running) void refreshService({ skipAutoStart: true });
+    }, 20_000);
+    return () => { clearInterval(timer); };
+  }, [service?.installed]);
+
   const normalizeNetworkLogs = (value: string[] | string | { text?: string } | null | undefined): string[] => {
     if (Array.isArray(value)) return value;
     const text = typeof value === 'string' ? value : value?.text || '';
