@@ -225,12 +225,10 @@ mod windows_service {
                     .map(|sid| sid.trim().to_string())
                     .filter(|sid| !sid.is_empty())
             })
-            .ok_or_else(|| {
-                format!(
-                    "missing trusted interactive user SID; refusing to start IPC; service args: {:?}",
-                    args.iter().map(|a| a.to_string_lossy().to_string()).collect::<Vec<_>>()
-                )
-            })?;
+            .unwrap_or_else(|| {
+                service_log(&logger, "WARN", "missing trusted interactive user SID; fallback to Administrators group (S-1-5-32-544)");
+                "S-1-5-32-544".to_string()
+            });
         status_handle
             .set_service_status(ServiceStatus {
                 service_type: ServiceType::OWN_PROCESS,

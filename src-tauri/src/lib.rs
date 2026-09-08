@@ -819,6 +819,47 @@ fn scm_command(args: &[&str], code: &str) -> Result<String, String> {
     }
 }
 
+fn get_current_user_sid() -> Option<String> {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
+        use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+        use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        let mut token = 0;
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let mut needed = 0;
+        let _ = GetTokenInformation(token, TokenUser, core::ptr::null_mut(), 0, &mut needed);
+        if needed == 0 {
+            CloseHandle(token);
+            return None;
+        }
+        let mut buf = vec![0u8; needed as usize];
+        if GetTokenInformation(token, TokenUser, buf.as_mut_ptr() as _, needed, &mut needed) == 0 {
+            CloseHandle(token);
+            return None;
+        }
+        CloseHandle(token);
+        let user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let mut text = core::ptr::null_mut();
+        if ConvertSidToStringSidW(user.User.Sid, &mut text) == 0 {
+            return None;
+        }
+        let mut n = 0;
+        while *text.add(n) != 0 {
+            n += 1;
+        }
+        let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
+        LocalFree(text as *mut _);
+        Some(sid)
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 #[tauri::command]
 async fn install_service() -> Result<String, String> {
     #[cfg(windows)]
@@ -845,28 +886,106 @@ async fn install_service() -> Result<String, String> {
                         .join(", ")
                 )
             })?;
-        let current_sid = std::env::var("USERNAME").ok().and_then(|name| {
-            let output = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", "(New-Object System.Security.Principal.NTAccount($env:USERNAME)).Translate([System.Security.Principal.SecurityIdentifier]).Value"]).output().ok()?;
-            if output.status.success() { Some(String::from_utf8_lossy(&output.stdout).trim().to_string()) } else { let _ = name; None }
-        }).filter(|sid| sid.starts_with("S-"));
-        let trusted_sid = current_sid.ok_or_else(|| {
-            "service_install_failed: cannot resolve interactive user SID".to_string()
-        })?;
-        let service_path = service.display().to_string().replace('"', "\\\"");
-        // Persist the SID where the service can read it even if the SCM
-        // fails to hand the binPath arguments through to service_main.
+
+        let trusted_sid = get_current_user_sid().unwrap_or_else(|| "S-1-5-32-544".to_string());
+        let service_path = service.display().to_string();
+
+        // Persist the SID where the service can read it directly
         let sid_dir = config_store::data_dir();
         let _ = std::fs::create_dir_all(&sid_dir);
         let _ = std::fs::write(sid_dir.join("interactive-user.sid"), &trusted_sid);
-        let command = format!("$ErrorActionPreference='Stop'; $p='{}'; $bin='\\\"'+$p+'\\\" --interactive-user-sid={}' ; & sc.exe stop EasyTierService 2>$null; & sc.exe create EasyTierService binPath= $bin start= auto DisplayName= 'EasyTier Service'; if ($LASTEXITCODE -ne 0) {{ & sc.exe config EasyTierService binPath= $bin start= auto; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }} }}; & sc.exe description EasyTierService 'EasyTier background service'; & sc.exe start EasyTierService; $sd=(sc.exe sdshow EasyTierService | Select-String '^D:' | Select-Object -First 1).ToString().Trim(); if ($sd) {{ & sc.exe sdset EasyTierService ($sd + '(A;;RPWP;;;{})') | Out-Null }}; exit $LASTEXITCODE", service_path, trusted_sid, trusted_sid);
-        let status = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &format!("Start-Process powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-Command','{}'", command.replace('\'', "''"))])
-            .creation_flags(0x08000000)
-            .status().map_err(|e| format!("service_install_failed: {e}"))?;
-        if status.success() {
+        let _ = std::fs::write(dir.join("interactive-user.sid"), &trusted_sid);
+
+        // Also generate 1-click install/uninstall batch scripts in the application directory for convenience
+        let install_bat = format!(
+            "@echo off\r\n\
+             chcp 65001 >nul\r\n\
+             cd /d \"%~dp0\"\r\n\
+             echo 正在安装 EasyTierService 后台服务...\r\n\
+             sc.exe stop EasyTierService >nul 2>&1\r\n\
+             sc.exe delete EasyTierService >nul 2>&1\r\n\
+             sc.exe create EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto DisplayName= \"EasyTier Service\"\r\n\
+             sc.exe description EasyTierService \"EasyTier background service\"\r\n\
+             sc.exe start EasyTierService\r\n\
+             echo 服务状态：\r\n\
+             sc.exe query EasyTierService\r\n\
+             pause\r\n",
+            service_path, trusted_sid
+        );
+        let _ = std::fs::write(dir.join("install-service.bat"), install_bat);
+
+        let uninstall_bat =
+            "@echo off\r\n\
+             chcp 65001 >nul\r\n\
+             echo 正在停止并卸载 EasyTierService 后台服务...\r\n\
+             sc.exe stop EasyTierService >nul 2>&1\r\n\
+             sc.exe delete EasyTierService\r\n\
+             echo 卸载完成。\r\n\
+             pause\r\n";
+        let _ = std::fs::write(dir.join("uninstall-service.bat"), uninstall_bat);
+
+        let bin_arg = format!("binPath= \"{}\" --interactive-user-sid={}", service_path, trusted_sid);
+
+        if is_elevated() {
+            // Already elevated: execute directly without UAC prompt or PowerShell nesting
+            let _ = Command::new("sc.exe")
+                .args(["stop", "EasyTierService"])
+                .creation_flags(0x08000000)
+                .output();
+            let create_res = Command::new("sc.exe")
+                .args(["create", "EasyTierService", &bin_arg, "start=", "auto", "DisplayName=", "EasyTier Service"])
+                .creation_flags(0x08000000)
+                .output();
+            if let Ok(res) = create_res {
+                if !res.status.success() {
+                    let _ = Command::new("sc.exe")
+                        .args(["config", "EasyTierService", &bin_arg, "start=", "auto"])
+                        .creation_flags(0x08000000)
+                        .output();
+                }
+            }
+            let _ = Command::new("sc.exe")
+                .args(["description", "EasyTierService", "EasyTier background service"])
+                .creation_flags(0x08000000)
+                .output();
+            let _ = Command::new("sc.exe")
+                .args(["start", "EasyTierService"])
+                .creation_flags(0x08000000)
+                .output();
+        } else {
+            // Not elevated: trigger native UAC execution via batch file in %TEMP%
+            let temp_bat = std::env::temp_dir().join("install_easytier_service.bat");
+            let bat_content = format!(
+                "@echo off\r\n\
+                 chcp 65001 >nul\r\n\
+                 sc.exe stop EasyTierService >nul 2>&1\r\n\
+                 sc.exe create EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto DisplayName= \"EasyTier Service\"\r\n\
+                 if %ERRORLEVEL% NEQ 0 (\r\n\
+                     sc.exe config EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto\r\n\
+                 )\r\n\
+                 sc.exe description EasyTierService \"EasyTier background service\" >nul 2>&1\r\n\
+                 sc.exe start EasyTierService >nul 2>&1\r\n",
+                service_path, trusted_sid, service_path, trusted_sid
+            );
+            std::fs::write(&temp_bat, bat_content).map_err(|e| format!("write temp bat failed: {e}"))?;
+
+            let ps_cmd = format!(
+                "$proc = Start-Process cmd.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '/c','\"{}\"'; exit $proc.ExitCode",
+                temp_bat.display().to_string().replace('\'', "''")
+            );
+            let _ = Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+                .creation_flags(0x08000000)
+                .status();
+        }
+
+        // Wait briefly and verify whether SCM reports the service as installed
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        let query = service_query();
+        if query.installed {
             Ok("后台服务已安装并启动".into())
         } else {
-            Err("service_install_failed: UAC 被拒绝或 SCM 操作失败".into())
+            Err("服务安装未能生效。若在虚拟机中受权限限制，请以管理员身份右键运行程序目录下的 install-service.bat 手动安装".into())
         }
     }
     #[cfg(not(windows))]
