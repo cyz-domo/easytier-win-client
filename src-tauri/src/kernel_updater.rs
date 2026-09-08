@@ -115,7 +115,34 @@ fn fetch_release(client: &Client, proxy: &str) -> Result<Release, String> {
         .map_err(|e| format!("解析 Release 信息失败：{e}"))
 }
 
-pub fn check(proxy: &str) -> Result<KernelUpdateInfo, String> {
+pub fn detect_current_version(core_path: Option<&Path>) -> String {
+    if let Some(p) = core_path {
+        if p.exists() {
+            let mut cmd = std::process::Command::new(p);
+            cmd.arg("--version")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000);
+            }
+            if let Ok(output) = cmd.output() {
+                if let Ok(out_str) = String::from_utf8(output.stdout) {
+                    for token in out_str.split_whitespace() {
+                        let clean = token.trim().trim_start_matches('v');
+                        if clean.chars().any(|c| c.is_ascii_digit()) && clean.contains('.') {
+                            return clean.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CURRENT_VERSION.to_string()
+}
+
+pub fn check(proxy: &str, core_path: Option<&Path>) -> Result<KernelUpdateInfo, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -132,11 +159,12 @@ pub fn check(proxy: &str) -> Result<KernelUpdateInfo, String> {
         .iter()
         .find(|x| x.name == expected)
         .ok_or_else(|| format!("Release 中没有当前架构资产：{expected}"))?;
+    let current_ver = detect_current_version(core_path);
     Ok(KernelUpdateInfo {
-        current_version: CURRENT_VERSION.into(),
+        current_version: current_ver.clone(),
         latest_version: Some(latest.clone()),
         asset_name: Some(asset.name.clone()),
-        update_available: latest != CURRENT_VERSION,
+        update_available: latest != current_ver,
         error: None,
     })
 }

@@ -201,10 +201,31 @@ export default function App() {
       setService({ ...next, installed: true, running: true });
       if (next.running && next.healthy !== false) {
         const states = await serviceRequest<ServiceInstanceState[]>('list_instances');
-        setInstances(xs => xs.map(i => {
-          const s = states.find(x => x.id === i.id);
-          return s ? { ...i, name: s.name || i.name, rpcPort: s.rpc_port ?? i.rpcPort, status: s.observed_state, autoStart: s.auto_start, desiredState: s.desired_state, lastError: s.last_error, remoteManageEnabled: s.remote_manage_enabled ?? i.remoteManageEnabled, rpcWhitelistCidrs: s.rpc_whitelist_cidrs ?? i.rpcWhitelistCidrs } : i;
-        }));
+        setInstances(xs => {
+          const mapped = xs.map(i => {
+            const s = states.find(x => x.id === i.id);
+            return s ? { ...i, name: s.name || i.name, rpcPort: s.rpc_port ?? i.rpcPort, status: s.observed_state, autoStart: s.auto_start, desiredState: s.desired_state, lastError: s.last_error, remoteManageEnabled: s.remote_manage_enabled ?? i.remoteManageEnabled, rpcWhitelistCidrs: s.rpc_whitelist_cidrs ?? i.rpcWhitelistCidrs } : i;
+          });
+          const existingIds = new Set(xs.map(i => i.id));
+          const additions: Instance[] = [];
+          for (const s of states) {
+            if (!existingIds.has(s.id)) {
+              additions.push({
+                id: s.id,
+                name: s.name || '网络实例',
+                status: s.observed_state,
+                rpcPort: s.rpc_port ?? 15888,
+                config: defaultConfig(),
+                autoStart: s.auto_start,
+                desiredState: s.desired_state,
+                lastError: s.last_error,
+                remoteManageEnabled: s.remote_manage_enabled,
+                rpcWhitelistCidrs: s.rpc_whitelist_cidrs,
+              });
+            }
+          }
+          return additions.length > 0 ? [...mapped, ...additions] : mapped;
+        });
       }
     } catch (e) {
       // SCM says the service is up but IPC keeps failing: a hiccup, not a

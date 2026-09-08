@@ -332,23 +332,27 @@ mod windows_service {
         // Mirror the GUI's runtime_dir candidates: the service CWD is
         // System32, so relative lookups must be anchored at the exe dir.
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                candidates.push(dir.join("core"));
-                candidates.push(dir.join("../core"));
-                candidates.push(dir.join("../../../core"));
-                candidates.push(dir.join("resources/core"));
-                candidates.push(dir.join("../resources/core"));
-            }
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|p| p.to_path_buf()));
+        if let Some(dir) = &exe_dir {
+            candidates.push(dir.join("core"));
+            candidates.push(dir.join("../core"));
+            candidates.push(dir.join("../../../core"));
+            candidates.push(dir.join("resources/core"));
+            candidates.push(dir.join("../resources/core"));
         }
-        candidates.push(std::path::PathBuf::from("core"));
         for c in &candidates {
             let core = c.join("easytier-core.exe");
             if core.exists() {
                 return core;
             }
         }
-        std::path::PathBuf::from("core/easytier-core.exe")
+        if let Some(dir) = exe_dir {
+            dir.join("core").join("easytier-core.exe")
+        } else {
+            std::path::PathBuf::from("core/easytier-core.exe")
+        }
     }
 
     /// Find orphaned easytier-core.exe processes still running with a managed

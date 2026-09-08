@@ -376,7 +376,8 @@ fn drop_instance_state(
 }
 #[tauri::command]
 fn check_kernel_update(proxy: Option<String>) -> Result<KernelUpdateInfo, String> {
-    kernel_updater::check(proxy.as_deref().unwrap_or("direct"))
+    let (core, _) = paths(None);
+    kernel_updater::check(proxy.as_deref().unwrap_or("direct"), Some(&core))
 }
 
 #[tauri::command]
@@ -515,8 +516,9 @@ fn update_kernel(
         None,
         None,
     );
+    let updated_version = kernel_updater::detect_current_version(Some(&runtime.join("easytier-core.exe")));
     Ok(KernelUpdateInfo {
-        current_version: kernel_updater::CURRENT_VERSION.to_string(),
+        current_version: updated_version,
         latest_version: None,
         asset_name: None,
         update_available: false,

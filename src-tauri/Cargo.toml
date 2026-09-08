@@ -20,6 +20,7 @@ path = "src/service_main.rs"
 tauri-build = { version = "2", features = [] }
 
 [features]
+default = ["remote-rpc"]
 remote-rpc = []
 
 [dependencies]

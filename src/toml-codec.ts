@@ -210,11 +210,41 @@ export function encodeTOML(c: NetworkConfig, exportSecrets = true): string {
   return lines.join('\n') + '\n';
 }
 
+function stripInlineComment(line: string): string {
+  let inDouble = false;
+  let inSingle = false;
+  let escaped = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && inDouble) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '#' && !inDouble && !inSingle) {
+      return line.slice(0, i).trim();
+    }
+  }
+  return line.trim();
+}
+
 function parseSectionBlock(lines: string[], start: number): { body: string[]; end: number } {
   const body: string[] = [];
   let i = start + 1;
   while (i < lines.length && !/^\s*\[\[?[^[\]]+\]\]?\s*$/.test(lines[i])) {
-    if (lines[i].trim()) body.push(lines[i].trim());
+    const clean = stripInlineComment(lines[i]);
+    if (clean) body.push(clean);
     i += 1;
   }
   return { body, end: i - 1 };
@@ -227,8 +257,11 @@ function scalar(raw: string): string {
 
 function str(raw: string): string | null {
   const v = scalar(raw);
-  const m = v.match(/^"(.*)"$/);
-  return m ? m[1] : v || null;
+  const m = v.match(/^"((?:[^"\\]|\\.)*)"$/);
+  if (m) return m[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  const s = v.match(/^'(.*)'$/);
+  if (s) return s[1];
+  return v || null;
 }
 
 function bool(raw: string): boolean | null {
@@ -277,7 +310,8 @@ export function decodeTOML(text: string): NetworkConfig {
       i = end + 1;
       continue;
     }
-    if (line.trim()) root.push(line.trim());
+    const clean = stripInlineComment(line);
+    if (clean) root.push(clean);
     i += 1;
   }
 
