@@ -21,15 +21,15 @@
   FileClose $1
   nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\stop-service.ps1"'
   Pop $0
-  ; Kill any core launched from this installation before NSIS overwrites
-  ; WinDivert64.sys and related runtime files.
+  ; Do not rely on ExecutablePath here: CIM may return it empty for a
+  ; non-elevated portable process. The installer is upgrading EasyTier, so all
+  ; EasyTier core processes must be gone before replacing the WinDivert driver.
   FileOpen $1 "$PLUGINSDIR\stop-cores.ps1" w
-  FileWrite $1 "$$root = [IO.Path]::GetFullPath('$INSTDIR').TrimEnd('\')$\r$\n"
-  FileWrite $1 "Get-CimInstance Win32_Process -Filter 'Name=''easytier-core.exe''' | Where-Object { $$_.ExecutablePath -like ($$root + '*') } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }$\r$\n"
+  FileWrite $1 "Get-Process -Name 'easytier-core' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $1 "for ($$i=0; $$i -lt 40; $$i++) { $$locked = $$false; try { $$f = [IO.File]::Open((Join-Path '$INSTDIR' 'core\WinDivert64.sys'), 'Open', 'ReadWrite', 'None'); $$f.Close() } catch { $$locked = $$true }; if (-not $$locked) { exit 0 }; Start-Sleep -Milliseconds 500 }$\r$\n"
   FileClose $1
   nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\stop-cores.ps1"'
   Pop $0
-  Sleep 1500
   ; Retry delete and confirm the SCM entry is gone before continuing.
   StrCpy $1 0
   service_delete_loop:
