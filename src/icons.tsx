@@ -109,3 +109,10 @@ export const IconRefresh = (p: P) => (
     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
   </svg>
 );
+
+export const IconPencil = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+  </svg>
+);
+

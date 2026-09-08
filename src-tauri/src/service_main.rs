@@ -39,6 +39,39 @@ mod windows_service {
         backups: u32,
     }
 
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct SYSTEMTIME {
+        wYear: u16,
+        wMonth: u16,
+        wDayOfWeek: u16,
+        wDay: u16,
+        wHour: u16,
+        wMinute: u16,
+        wSecond: u16,
+        wMilliseconds: u16,
+    }
+    #[cfg(windows)]
+    extern "system" {
+        fn GetLocalTime(lpSystemTime: *mut SYSTEMTIME);
+    }
+
+    fn local_timestamp() -> String {
+        #[cfg(windows)]
+        unsafe {
+            let mut st = std::mem::zeroed();
+            GetLocalTime(&mut st);
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            task_timestamp().to_string()
+        }
+    }
+
     impl RotatingLog {
         fn new() -> Self {
             let dir = std::env::current_exe()
@@ -56,7 +89,7 @@ mod windows_service {
         fn write(&mut self, level: &str, message: &str) {
             let line = format!(
                 "{} [{}] {}\r\n",
-                task_timestamp(),
+                local_timestamp(),
                 level,
                 message.replace(['\r', '\n'], " ")
             );
@@ -315,7 +348,7 @@ mod windows_service {
         }
         runtime.lock().unwrap().stop_all();
         service_log(&logger, "INFO", "EasyTierService stopped");
-        status_handle
+        let _ = status_handle
             .set_service_status(ServiceStatus {
                 service_type: ServiceType::OWN_PROCESS,
                 current_state: ServiceState::Stopped,
@@ -324,8 +357,8 @@ mod windows_service {
                 checkpoint: 0,
                 wait_hint: std::time::Duration::default(),
                 process_id: None,
-            })
-            .map_err(|e| e.to_string())
+            });
+        std::process::exit(0);
     }
 
     fn service_core_path() -> std::path::PathBuf {
@@ -341,6 +374,8 @@ mod windows_service {
             candidates.push(dir.join("../../../core"));
             candidates.push(dir.join("resources/core"));
             candidates.push(dir.join("../resources/core"));
+            candidates.push(dir.join("resources"));
+            candidates.push(dir.join("../resources"));
         }
         for c in &candidates {
             let core = c.join("easytier-core.exe");
@@ -639,11 +674,11 @@ mod windows_service {
                         .map_err(|e| ("core_not_found", e))?;
                     // Brief readiness probe; the lock is released between
                     // probes so other IPC requests are not blocked.
-                    for _ in 0..8 {
+                    for _ in 0..3 {
                         if runtime.lock().unwrap().portal_ready(c) {
                             break;
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        std::thread::sleep(std::time::Duration::from_millis(150));
                     }
                 } else {
                     c.desired_state = DesiredState::Stopped;
@@ -767,9 +802,25 @@ mod windows_service {
                     .get(id)
                     .cloned()
                     .ok_or(("invalid_request", "task not found".into()))?;
-                Ok(
-                    serde_json::json!({"task_id": id, "phase": task.phase, "downloaded_bytes": task.downloaded_bytes, "total_bytes": task.total_bytes, "percent": task.percent, "message": task.message, "result": task.result, "error": task.error}),
-                )
+                let progress_obj = serde_json::json!({
+                    "phase": task.phase,
+                    "downloaded_bytes": task.downloaded_bytes,
+                    "total_bytes": task.total_bytes,
+                    "percent": task.percent,
+                    "message": task.message,
+                });
+                Ok(serde_json::json!({
+                    "task_id": id,
+                    "status": task.phase,
+                    "phase": task.phase,
+                    "downloaded_bytes": task.downloaded_bytes,
+                    "total_bytes": task.total_bytes,
+                    "percent": task.percent,
+                    "message": task.message,
+                    "result": task.result,
+                    "error": task.error,
+                    "progress": progress_obj,
+                }))
             }
             "update_kernel" => {
                 let proxy = req
@@ -778,6 +829,12 @@ mod windows_service {
                     .and_then(|v| v.as_str())
                     .unwrap_or("direct")
                     .to_string();
+                let target_version = req
+                    .payload
+                    .get("target_version")
+                    .or_else(|| req.payload.get("targetVersion"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 let mut busy = update_lock.lock().unwrap();
                 if *busy {
                     return Err(("busy", "kernel update already running".into()));
@@ -804,9 +861,32 @@ mod windows_service {
                 let lock2 = update_lock.clone();
                 let id2 = task_id.clone();
                 std::thread::spawn(move || {
-                    run_kernel_update(id2, proxy, state2, runtime2, tasks2, lock2)
+                    run_kernel_update(id2, proxy, target_version, state2, runtime2, tasks2, lock2)
                 });
-                Ok(serde_json::json!({"task_id": task_id}))
+                Ok(serde_json::json!({
+                    "task_id": task_id,
+                    "status": "queued",
+                    "progress": {
+                        "phase": "queued",
+                        "downloaded_bytes": 0,
+                        "total_bytes": null,
+                        "percent": 0,
+                        "message": "内核更新已排队"
+                    }
+                }))
+            }
+            "cancel_kernel_update" => {
+                kernel_updater::cancel_update();
+                *update_lock.lock().unwrap() = false;
+                for task in tasks.lock().unwrap().values_mut() {
+                    if !matches!(task.phase.as_str(), "completed" | "failed" | "cancelled") {
+                        task.phase = "cancelled".into();
+                        task.message = "用户取消了内核更新".into();
+                        task.error = None;
+                    }
+                }
+                service_log(logger, "INFO", "kernel update cancelled by user");
+                Ok(serde_json::json!({"cancelled": true}))
             }
             _ => Err(("invalid_request", "unknown command".into())),
         }
@@ -839,6 +919,7 @@ mod windows_service {
     fn run_kernel_update(
         task_id: String,
         proxy: String,
+        target_version: Option<String>,
         state: Arc<Mutex<config_store::ServiceState>>,
         runtime: Arc<Mutex<runtime_manager::RuntimeManager>>,
         tasks: Tasks,
@@ -866,6 +947,7 @@ mod windows_service {
         };
         let staged = match kernel_updater::download_and_stage_with_progress(
             &proxy,
+            target_version.as_deref(),
             &runtime_dir,
             |phase, message, downloaded, total, file, error| {
                 set_task(
@@ -880,10 +962,21 @@ mod windows_service {
         ) {
             Ok(path) => path,
             Err(error) => {
-                finish("failed", "内核下载或校验失败".into(), Some(error), None);
+                let is_cancel = kernel_updater::is_cancelled() || error.contains("取消");
+                finish(
+                    if is_cancel { "cancelled" } else { "failed" },
+                    if is_cancel { "内核更新已取消".into() } else { "内核下载或校验失败".into() },
+                    if is_cancel { None } else { Some(error) },
+                    None,
+                );
                 return;
             }
         };
+        if kernel_updater::is_cancelled() {
+            let _ = std::fs::remove_dir_all(staged.parent().unwrap_or(&staged));
+            finish("cancelled", "内核更新已取消".into(), None, None);
+            return;
+        }
         let configs = state.lock().unwrap().instances.clone();
         let running: Vec<_> = configs
             .iter()
@@ -918,6 +1011,9 @@ mod windows_service {
             None,
         );
         if let Err(error) = kernel_updater::install(&runtime_dir, &staged) {
+            for config in &running {
+                let _ = runtime.lock().unwrap().start(config);
+            }
             finish("failed", "内核替换失败".into(), Some(error), None);
             return;
         }

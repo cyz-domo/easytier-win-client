@@ -2,6 +2,7 @@
 mod config_store;
 mod ipc;
 mod kernel_updater;
+pub mod power_monitor;
 mod portal_args;
 mod remote_rpc;
 mod runtime_manager;
@@ -10,6 +11,7 @@ use kernel_updater::KernelUpdateInfo;
 use named_pipe::PipeClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tauri::Emitter;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
@@ -72,7 +74,7 @@ struct RestartInstance {
 }
 
 #[derive(Default)]
-struct KernelUpdateLock(Mutex<()>);
+struct KernelUpdateLock(tokio::sync::Mutex<()>);
 
 fn runtime_dir(runtime_dir: Option<String>) -> PathBuf {
     if let Some(d) = runtime_dir {
@@ -90,6 +92,8 @@ fn runtime_dir(runtime_dir: Option<String>) -> PathBuf {
             candidates.push(dir.join("../../../core"));
             candidates.push(dir.join("resources/core"));
             candidates.push(dir.join("../resources/core"));
+            candidates.push(dir.join("resources"));
+            candidates.push(dir.join("../resources"));
         }
     }
     for c in candidates {
@@ -151,32 +155,38 @@ fn service_query() -> ServiceInstallation {
 
 #[tauri::command]
 async fn query_service_installation() -> Result<ServiceInstallation, String> {
-    Ok(service_query())
+    tokio::task::spawn_blocking(service_query)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn detect_runtime(runtime_dir: Option<String>) -> Result<RuntimeInfo, String> {
-    let (core, cli) = paths(runtime_dir);
-    let mut command = Command::new(&core);
-    command
-        .arg("--version")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    command.creation_flags(0x08000000);
-    let version = command
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_else(|| "unknown".into())
-        .trim()
-        .to_string();
-    Ok(RuntimeInfo {
-        core_path: core.display().to_string(),
-        cli_path: cli.display().to_string(),
-        version,
-        available: core.exists() && cli.exists(),
+    tokio::task::spawn_blocking(move || {
+        let (core, cli) = paths(runtime_dir);
+        let mut command = Command::new(&core);
+        command
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
+        let version = command
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_else(|| "unknown".into())
+            .trim()
+            .to_string();
+        RuntimeInfo {
+            core_path: core.display().to_string(),
+            cli_path: cli.display().to_string(),
+            version,
+            available: core.exists() && cli.exists(),
+        }
     })
+    .await
+    .map_err(|e| e.to_string())
 }
 #[tauri::command]
 fn get_instance_state(
@@ -310,7 +320,54 @@ fn wait_for_exit(
             Ok(Some(status)) => {
                 let mut child = p.children.remove(&id).unwrap();
                 let _ = child.wait();
-                let err = format!("core 进程启动后立即退出（exit code: {}）。常见原因：监听器端口被占用（多实例需使用不同 listener 端口）、配置校验失败或缺少管理员权限。", status.code().unwrap_or(-1));
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                let log_text = p
+                    .logs
+                    .get(&id)
+                    .map(|l| l.lock().unwrap().text())
+                    .unwrap_or_default();
+                let filtered: Vec<&str> = log_text
+                    .lines()
+                    .filter(|line| {
+                        let l = line.to_lowercase();
+                        l.contains("error")
+                            || l.contains("fail")
+                            || l.contains("os error")
+                            || l.contains("caused by")
+                            || l.contains("10048")
+                            || l.contains("refused")
+                            || l.contains("denied")
+                            || l.contains("warn")
+                    })
+                    .collect();
+                let detail = if !filtered.is_empty() {
+                    filtered.join("\n")
+                } else if !log_text.trim().is_empty() {
+                    log_text
+                        .lines()
+                        .rev()
+                        .take(5)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    String::new()
+                };
+
+                let err = if !detail.is_empty() {
+                    format!(
+                        "core 进程启动后立即退出（exit code: {}）。错误详情：\n{}",
+                        status.code().unwrap_or(-1),
+                        detail
+                    )
+                } else {
+                    format!(
+                        "core 进程启动后立即退出（exit code: {}）。常见原因：监听器端口被占用（多实例需使用不同 listener 端口）、配置校验失败或缺少管理员权限。",
+                        status.code().unwrap_or(-1)
+                    )
+                };
                 p.last_error.insert(id.clone(), err.clone());
                 return Ok(InstanceState {
                     id,
@@ -375,33 +432,64 @@ fn drop_instance_state(
     Ok(())
 }
 #[tauri::command]
-fn check_kernel_update(proxy: Option<String>) -> Result<KernelUpdateInfo, String> {
-    let (core, _) = paths(None);
-    kernel_updater::check(proxy.as_deref().unwrap_or("direct"), Some(&core))
+async fn check_kernel_update(proxy: Option<String>) -> Result<KernelUpdateInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        let (core, _) = paths(None);
+        kernel_updater::check(proxy.as_deref().unwrap_or("direct"), Some(&core))
+    })
+    .await
+    .map_err(|e| format!("检查更新任务异常：{e}"))?
 }
 
 #[tauri::command]
-fn update_kernel(
+async fn list_kernel_versions(proxy: Option<String>) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        kernel_updater::list_available_versions(proxy.as_deref().unwrap_or("direct"))
+    })
+    .await
+    .map_err(|e| format!("获取版本列表任务异常：{e}"))?
+}
+
+#[tauri::command]
+fn cancel_kernel_update() {
+    kernel_updater::cancel_update();
+}
+
+#[tauri::command]
+async fn update_kernel(
     app: tauri::AppHandle,
     proxy: String,
+    target_version: Option<String>,
     instances: Vec<RestartInstance>,
     state: tauri::State<'_, Mutex<RuntimeProcesses>>,
     update_lock: tauri::State<'_, KernelUpdateLock>,
 ) -> Result<KernelUpdateInfo, String> {
     let _guard = update_lock
         .0
-        .lock()
-        .map_err(|_| "内核更新锁不可用".to_string())?;
+        .try_lock()
+        .map_err(|_| "内核更新正在进行中，请勿重复操作".to_string())?;
     let runtime = runtime_dir(None);
     let parent = runtime.parent().ok_or("无法确定 core 目录")?.to_path_buf();
     kernel_updater::emit_progress(&app, "checking", "正在准备内核更新", 0, None, None, None);
-    let staged = match kernel_updater::download_and_stage(&app, proxy.as_str(), &runtime) {
+
+    let app_handle = app.clone();
+    let proxy_arg = proxy.clone();
+    let target_ver_arg = target_version.clone();
+    let runtime_arg = runtime.clone();
+    let staged_res = tokio::task::spawn_blocking(move || {
+        kernel_updater::download_and_stage(&app_handle, proxy_arg.as_str(), target_ver_arg.as_deref(), &runtime_arg)
+    })
+    .await
+    .map_err(|e| format!("下载线程执行异常：{e}"))?;
+
+    let staged = match staged_res {
         Ok(path) => path,
         Err(error) => {
+            let is_cancelled = kernel_updater::is_cancelled() || error.contains("取消");
             kernel_updater::emit_progress(
                 &app,
-                "failed",
-                "内核下载或校验失败",
+                if is_cancelled { "cancelled" } else { "failed" },
+                if is_cancelled { "内核更新已取消" } else { "内核下载或校验失败" },
                 0,
                 None,
                 None,
@@ -410,6 +498,13 @@ fn update_kernel(
             return Err(error);
         }
     };
+
+    if kernel_updater::is_cancelled() {
+        let _ = std::fs::remove_dir_all(&parent.join(staged.file_name().unwrap_or_default()));
+        kernel_updater::emit_progress(&app, "cancelled", "内核更新已取消", 0, None, None, None);
+        return Err("用户取消了内核更新".into());
+    }
+
     kernel_updater::emit_progress(
         &app,
         "stopping",
@@ -522,6 +617,7 @@ fn update_kernel(
         latest_version: None,
         asset_name: None,
         update_available: false,
+        available_versions: None,
         error: None,
     })
 }
@@ -562,6 +658,43 @@ fn is_elevated() -> bool {
 #[tauri::command]
 fn is_port_in_use(port: u16) -> bool {
     std::net::TcpListener::bind(("0.0.0.0", port)).is_err()
+        || std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+        || std::net::UdpSocket::bind(("0.0.0.0", port)).is_err()
+}
+
+#[tauri::command]
+fn restart_as_admin(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe_wide: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let verb_wide: Vec<u16> = OsStr::new("runas").encode_wide().chain(std::iter::once(0)).collect();
+
+        unsafe {
+            let res = ShellExecuteW(
+                0,
+                verb_wide.as_ptr(),
+                exe_wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1, // SW_SHOWNORMAL
+            );
+            if (res as isize) <= 32 {
+                return Err(format!("无法以管理员权限启动（错误码: {}）", res as isize));
+            }
+        }
+        app.exit(0);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Err("仅支持 Windows 平台".to_string())
+    }
 }
 
 #[cfg(windows)]
@@ -629,26 +762,33 @@ async fn run_cli(args: Vec<String>, runtime_dir: Option<String>) -> Result<Strin
     }
 }
 #[tauri::command]
-fn service_request(request: Value) -> Result<Value, String> {
+async fn service_request(request: Value) -> Result<Value, String> {
     let bytes = serde_json::to_vec(&request).map_err(|e| format!("invalid_request: {e}"))?;
     if bytes.len() > ipc::MAX_MESSAGE {
         return Err("message_too_large".into());
     }
     #[cfg(windows)]
     {
-        let mut pipe = PipeClient::connect(r"\\.\pipe\EasyTierService")
-            .map_err(|e| format!("service_unavailable: {e}"))?;
-        pipe.write_all(&bytes)
-            .and_then(|_| pipe.write_all(b"\n"))
-            .map_err(|e| format!("service_unavailable: {e}"))?;
-        let mut line = Vec::new();
-        BufReader::new(pipe)
-            .read_until(b'\n', &mut line)
-            .map_err(|e| format!("service_unavailable: {e}"))?;
-        if line.len() > ipc::MAX_MESSAGE {
-            return Err("message_too_large".into());
+        let task = tokio::task::spawn_blocking(move || {
+            let mut pipe = PipeClient::connect(r"\\.\pipe\EasyTierService")
+                .map_err(|e| format!("service_unavailable: {e}"))?;
+            pipe.write_all(&bytes)
+                .and_then(|_| pipe.write_all(b"\n"))
+                .map_err(|e| format!("service_unavailable: {e}"))?;
+            let mut line = Vec::new();
+            BufReader::new(pipe)
+                .read_until(b'\n', &mut line)
+                .map_err(|e| format!("service_unavailable: {e}"))?;
+            if line.len() > ipc::MAX_MESSAGE {
+                return Err("message_too_large".into());
+            }
+            serde_json::from_slice(&line).map_err(|e| format!("invalid_response: {e}"))
+        });
+        match tokio::time::timeout(std::time::Duration::from_millis(15000), task).await {
+            Ok(Ok(res)) => res,
+            Ok(Err(join_err)) => Err(format!("service_request error: {join_err}")),
+            Err(_) => Err("service_unavailable: request timed out".into()),
         }
-        serde_json::from_slice(&line).map_err(|e| format!("invalid_response: {e}"))
     }
     #[cfg(not(windows))]
     {
@@ -773,13 +913,11 @@ async fn repair_service() -> Result<String, String> {
 /// service instances), then exit. Used by both the tray quit action and the
 /// main window close button.
 fn quit_and_stop_networks(app: &tauri::AppHandle) {
-    let (_, cli) = paths(None);
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/FI", &format!("IMAGENAME eq {}", cli.file_name().unwrap_or_default().to_string_lossy())])
-        .creation_flags(0x08000000)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    // 1. Hide main window immediately so the user sees instant feedback
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+    // 2. Stop local processes
     if let Ok(mut p) = app.state::<Mutex<RuntimeProcesses>>().lock() {
         for (id, mut child) in p.children.drain() {
             let _ = child.kill();
@@ -787,74 +925,43 @@ fn quit_and_stop_networks(app: &tauri::AppHandle) {
             let _ = std::fs::remove_file(std::env::temp_dir().join(format!("easytier-{}.toml", id)));
         }
     }
-    // Service mode: stop every instance, then ask the resident service to
-    // shut itself down so the whole stack goes away with the client. Read
-    // each response before proceeding; fire-and-forget writes race with
-    // app.exit. An old service binary may not know the newer commands —
-    // fall back to per-instance stops in that case.
+    // 3. Fast cleanup of CLI
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/IM", "easytier-cli.exe"])
+        .creation_flags(0x08000000)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    // 4. Send shutdown_service to service with short timeout
     #[cfg(windows)]
     {
         use std::io::{BufRead as _, Write as _};
-        let send = |command: &str| -> Option<Value> {
+        let _ = std::thread::spawn(|| {
             let request = serde_json::json!({
                 "protocol_version": ipc::PROTOCOL_VERSION,
                 "request_id": uuid::Uuid::new_v4().to_string(),
-                "command": command,
+                "command": "shutdown_service",
                 "payload": {},
             });
-            let bytes = serde_json::to_vec(&request).ok()?;
-            let mut pipe = PipeClient::connect(r"\\.\pipe\EasyTierService").ok()?;
-            pipe.write_all(&bytes).and_then(|_| pipe.write_all(b"\n")).ok()?;
-            let mut line = Vec::new();
-            BufReader::new(pipe).read_until(b'\n', &mut line).ok()?;
-            serde_json::from_slice(&line).ok()
-        };
-        let stopped_ok = send("stop_all_instances")
-            .and_then(|r| r.get("ok").and_then(|v| v.as_bool()))
-            .unwrap_or(false);
-        if !stopped_ok {
-            // Old service without stop_all_instances: stop each known
-            // instance individually.
-            let instances = send("list_instances")
-                .and_then(|r| r.get("data").cloned())
-                .map(|data| serde_json::from_value::<Vec<serde_json::Value>>(data).unwrap_or_default())
-                .unwrap_or_default();
-            for inst in instances {
-                if let Some(id) = inst.get("id").and_then(|v| v.as_str()) {
-                    let request = serde_json::json!({
-                        "protocol_version": ipc::PROTOCOL_VERSION,
-                        "request_id": uuid::Uuid::new_v4().to_string(),
-                        "command": "stop_instance",
-                        "payload": { "instance_id": id },
-                    });
-                    if let Ok(bytes) = serde_json::to_vec(&request) {
-                        if let Ok(mut pipe) = PipeClient::connect(r"\\.\pipe\EasyTierService") {
-                            let _ = pipe.write_all(&bytes).and_then(|_| pipe.write_all(b"\n"));
-                            let _ = BufReader::new(pipe).read_until(b'\n', &mut Vec::new());
-                        }
-                    }
+            if let Ok(bytes) = serde_json::to_vec(&request) {
+                if let Ok(mut pipe) = PipeClient::connect(r"\\.\pipe\EasyTierService") {
+                    let _ = pipe.write_all(&bytes).and_then(|_| pipe.write_all(b"\n"));
+                    let mut line = Vec::new();
+                    let _ = BufReader::new(pipe).read_until(b'\n', &mut line);
                 }
             }
-        }
-        send("shutdown_service");
-        // The GUI may be closing while the service pipe is already gone. As a
-        // final safety net, terminate only cores whose executable lives under
-        // this installation directory; never kill unrelated EasyTier copies.
-        if let Some(root) = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_string_lossy().replace('\'', "''")))
-        {
-            let script = format!(
-                "$root = [IO.Path]::GetFullPath('{}').TrimEnd('\\'); Get-CimInstance Win32_Process -Filter \"Name='easytier-core.exe'\" | Where-Object {{ $_.ExecutablePath -like \"$root*\" }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}",
-                root
-            );
-            let _ = Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
-                .creation_flags(0x08000000)
-                .output();
-        }
+        }).join();
+
+        // 5. Terminate any easytier-core.exe belonging to this installation
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", "easytier-core.exe"])
+            .creation_flags(0x08000000)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
-    app.exit(0);
+    std::process::exit(0);
 }
 
 #[tauri::command]
@@ -881,6 +988,186 @@ async fn remote_config_patch(host: String, port: u16, instance_id: String, patch
     remote_rpc::patch_remote_config(&host, port, &instance_id, patch).await
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TrayStatusPayload {
+    pub running: bool,
+    pub instance_id: Option<String>,
+    pub network_name: Option<String>,
+    pub virtual_ip: Option<String>,
+    pub peer_count: usize,
+    pub rx_speed: Option<String>,
+    pub tx_speed: Option<String>,
+}
+
+static CURRENT_RUNNING_INSTANCE: Mutex<Option<String>> = Mutex::new(None);
+static CURRENT_RUNNING_STATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[tauri::command]
+fn update_tray_status(app: tauri::AppHandle, payload: TrayStatusPayload) -> Result<(), String> {
+    CURRENT_RUNNING_STATE.store(payload.running, std::sync::atomic::Ordering::SeqCst);
+    if payload.running {
+        if let Some(ref id) = payload.instance_id {
+            if let Ok(mut g) = CURRENT_RUNNING_INSTANCE.lock() {
+                *g = Some(id.clone());
+            }
+        }
+    } else if let Ok(mut g) = CURRENT_RUNNING_INSTANCE.lock() {
+        *g = None;
+    }
+    let status_text = if payload.running {
+        format!(
+            "🟢 状态: 运行中 ({})",
+            payload.network_name.as_deref().unwrap_or("默认")
+        )
+    } else {
+        "⚪ 状态: 已停止".to_string()
+    };
+    let status_item =
+        tauri::menu::MenuItem::with_id(&app, "status_info", &status_text, false, None::<&str>)
+            .map_err(|e| e.to_string())?;
+
+    let ip_text = if let Some(ref ip) = payload.virtual_ip {
+        format!("📋 虚拟 IP: {} (点击复制)", ip)
+    } else {
+        "📋 虚拟 IP: 未分配".to_string()
+    };
+    let ip_item = tauri::menu::MenuItem::with_id(
+        &app,
+        "copy_ip",
+        &ip_text,
+        payload.virtual_ip.is_some(),
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let peer_text = format!("🌐 在线节点: {} 个", payload.peer_count);
+    let peer_item =
+        tauri::menu::MenuItem::with_id(&app, "peers_info", &peer_text, false, None::<&str>)
+            .map_err(|e| e.to_string())?;
+
+    let speed_text = format!(
+        "⚡ 瞬时流量: ↓ {}  ↑ {}",
+        payload.rx_speed.as_deref().unwrap_or("0 B/s"),
+        payload.tx_speed.as_deref().unwrap_or("0 B/s")
+    );
+    let speed_item =
+        tauri::menu::MenuItem::with_id(&app, "speed_info", &speed_text, false, None::<&str>)
+            .map_err(|e| e.to_string())?;
+
+    let sep1 = tauri::menu::PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?;
+
+    let toggle_text = if payload.running {
+        "⏹ 停止当前网络"
+    } else {
+        "▶ 启动网络"
+    };
+    let toggle = tauri::menu::MenuItem::with_id(&app, "toggle_network", toggle_text, true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+
+    let show =
+        tauri::menu::MenuItem::with_id(&app, "show", "💻 打开主窗口", true, None::<&str>)
+            .map_err(|e| e.to_string())?;
+
+    let sep2 = tauri::menu::PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?;
+
+    let quit =
+        tauri::menu::MenuItem::with_id(&app, "quit", "❌ 退出 EasyTier", true, None::<&str>)
+            .map_err(|e| e.to_string())?;
+
+    static LAST_MENU_KEY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let menu_key = format!(
+        "{}:{}:{}:{}",
+        payload.running,
+        payload.network_name.as_deref().unwrap_or(""),
+        payload.virtual_ip.as_deref().unwrap_or(""),
+        payload.peer_count
+    );
+
+    let mut key_guard = LAST_MENU_KEY.lock().map_err(|e| e.to_string())?;
+    let menu_changed = *key_guard != menu_key;
+
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        if menu_changed {
+            let menu = tauri::menu::Menu::with_items(
+                &app,
+                &[
+                    &status_item,
+                    &ip_item,
+                    &peer_item,
+                    &sep1,
+                    &toggle,
+                    &show,
+                    &sep2,
+                    &quit,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            let _ = tray.set_menu(Some(menu));
+            *key_guard = menu_key;
+        }
+
+        let tooltip = if payload.running {
+            format!(
+                "EasyTier 运行中\nIP: {}\n{} 个节点在线\n↓ {}  ↑ {}",
+                payload.virtual_ip.as_deref().unwrap_or("-"),
+                payload.peer_count,
+                payload.rx_speed.as_deref().unwrap_or("0 B/s"),
+                payload.tx_speed.as_deref().unwrap_or("0 B/s")
+            )
+        } else {
+            "EasyTier - 已停止".to_string()
+        };
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn trim_process_tree_working_set() {
+    unsafe {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetCurrentProcessId, OpenProcess, SetProcessWorkingSetSize,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+        };
+        // 1. Trim host process
+        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+
+        // 2. Enumerate and trim all child processes (WebView2 browser, GPU, renderer, utility)
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+        };
+        let my_pid = GetCurrentProcessId();
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot != 0 && snapshot != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            if Process32FirstW(snapshot, &mut entry) != 0 {
+                loop {
+                    if entry.th32ParentProcessID == my_pid {
+                        let child = OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID);
+                        if child != 0 {
+                            SetProcessWorkingSetSize(child, usize::MAX, usize::MAX);
+                            windows_sys::Win32::Foundation::CloseHandle(child);
+                        }
+                    }
+                    if Process32NextW(snapshot, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            windows_sys::Win32::Foundation::CloseHandle(snapshot);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn trim_process_tree_working_set() {}
+
+#[tauri::command]
+fn trim_memory() {
+    trim_process_tree_working_set();
+}
+
 pub fn run() {
     tauri::Builder::default()
         // Must be the first registered plugin: while an instance is already
@@ -897,6 +1184,9 @@ pub fn run() {
         .manage(Mutex::new(RuntimeProcesses::default()))
         .manage(KernelUpdateLock::default())
         .setup(|app| {
+            #[cfg(windows)]
+            power_monitor::windows_power::init_power_monitor(app.handle().clone());
+
             let show =
                 tauri::menu::MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?;
             let quit =
@@ -904,19 +1194,94 @@ pub fn run() {
             let menu = tauri::menu::Menu::with_items(app, &[&show, &quit])?;
             let tray_icon = Image::from_bytes(include_bytes!("../icons/icon.png"))
                 .map_err(|e| e.to_string())?;
-            tauri::tray::TrayIconBuilder::new()
+            tauri::tray::TrayIconBuilder::with_id("main-tray")
                 .icon(tray_icon)
                 .menu(&menu)
+                .show_menu_on_left_click(false)
                 .tooltip("EasyTier")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "copy_ip" => {
+                        let _ = app.emit("tray-copy-ip", ());
+                    }
+                    "toggle_network" => {
+                        let _ = app.emit("tray-toggle-network", ());
+                        let is_running = CURRENT_RUNNING_STATE.load(std::sync::atomic::Ordering::SeqCst);
+                        if is_running {
+                            let app_handle = app.clone();
+                            std::thread::spawn(move || {
+                                // 1. Stop local processes
+                                if let Ok(mut p) = app_handle.state::<Mutex<RuntimeProcesses>>().lock() {
+                                    for (id, mut child) in p.children.drain() {
+                                        let _ = child.kill();
+                                        let _ = child.wait();
+                                        let _ = std::fs::remove_file(std::env::temp_dir().join(format!("easytier-{}.toml", id)));
+                                    }
+                                }
+                                // 2. Stop service instances if any
+                                #[cfg(windows)]
+                                {
+                                    use std::io::{BufRead as _, Write as _};
+                                    let target_id = CURRENT_RUNNING_INSTANCE.lock().ok().and_then(|g| g.clone());
+                                    let req_payload = if let Some(id) = target_id {
+                                        serde_json::json!({ "instance_id": id })
+                                    } else {
+                                        serde_json::json!({})
+                                    };
+                                    let request = serde_json::json!({
+                                        "protocol_version": ipc::PROTOCOL_VERSION,
+                                        "request_id": uuid::Uuid::new_v4().to_string(),
+                                        "command": "stop_all_instances",
+                                        "payload": req_payload,
+                                    });
+                                    if let Ok(bytes) = serde_json::to_vec(&request) {
+                                        if let Ok(mut pipe) = PipeClient::connect(r"\\.\pipe\EasyTierService") {
+                                            let _ = pipe.write_all(&bytes).and_then(|_| pipe.write_all(b"\n"));
+                                            let mut line = Vec::new();
+                                            let _ = BufReader::new(pipe).read_until(b'\n', &mut line);
+                                        }
+                                    }
+                                }
+                                // 3. Update tray to stopped state immediately
+                                let _ = update_tray_status(app_handle.clone(), TrayStatusPayload {
+                                    running: false,
+                                    instance_id: None,
+                                    network_name: None,
+                                    virtual_ip: None,
+                                    peer_count: 0,
+                                    rx_speed: None,
+                                    tx_speed: None,
+                                });
+                            });
+                        } else if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
                             let _ = window.set_focus();
                         }
                     }
                     "quit" => quit_and_stop_networks(&app),
                     _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
                 })
                 .build(app)?;
             Ok(())
@@ -927,18 +1292,25 @@ pub fn run() {
                 // keep running. Full teardown happens via the tray quit item.
                 api.prevent_close();
                 let _ = window.hide();
+                #[cfg(windows)]
+                trim_process_tree_working_set();
             }
         })
         .invoke_handler(tauri::generate_handler![
+            trim_memory,
             query_service_installation,
             detect_runtime,
             get_instance_state,
             get_network_logs,
             is_elevated,
+            restart_as_admin,
             start_instance,
             wait_for_exit,
             check_kernel_update,
+            list_kernel_versions,
             update_kernel,
+            cancel_kernel_update,
+            update_tray_status,
             stop_instance,
             drop_status_endpoint,
             drop_instance_state,

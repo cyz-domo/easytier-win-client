@@ -5,9 +5,10 @@ import { defaultConfig, listenersForInstance, NetworkConfig, validateConfig } fr
 import { decodeTOML, encodeTOML } from './toml-codec';
 import { ConfigEditor } from './ConfigEditor';
 import { NodeStatus, PeerColumn, PeerInfo, PEER_COLUMNS, RefreshInterval, RouteInfo, formatBytes, latencyTone, parseHumanBytes, parseNodeJSON, parsePeerJSON, parseRouteJSON, routeTone } from './status-data';
-import { IconClipboard, IconCopy, IconDownload, IconGear, IconPlay, IconPlus, IconRefresh, IconSliders, IconStop, IconTerminal, IconTrash, IconUpload, IconUsers, IconGlobe } from './icons';
+import { IconClipboard, IconCopy, IconDownload, IconGear, IconPlay, IconPlus, IconRefresh, IconSliders, IconStop, IconTerminal, IconTrash, IconUpload, IconUsers, IconGlobe, IconPencil } from './icons';
 import easytierLogo from './assets/easytier-logo.png';
-
+import { TrafficAreaChart, TrafficSample, formatSpeed } from './TrafficAreaChart';
+import { RemoteConfigDialog } from './RemoteConfigDialog';
 
 import { getServiceStatus, serviceRequest, ServiceInstanceState, ServiceStatus } from './service-client';
 import { DialogHost, appAlert, appConfirm } from './dialogs';
@@ -38,13 +39,52 @@ function nextRpcPort(instances: Instance[]): number {
   return 0; // random
 }
 
+function loadNodeRpcPort(ip: string): number | null {
+  try {
+    const raw = localStorage.getItem('easytier.node_rpc_ports.v1');
+    if (raw) {
+      const map = JSON.parse(raw);
+      if (typeof map[ip] === 'number' && map[ip] > 0) return map[ip];
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function saveNodeRpcPort(ip: string, port: number) {
+  try {
+    const raw = localStorage.getItem('easytier.node_rpc_ports.v1');
+    const map = raw ? JSON.parse(raw) : {};
+    map[ip] = port;
+    localStorage.setItem('easytier.node_rpc_ports.v1', JSON.stringify(map));
+  } catch { /* ignore */ }
+}
+
+function getCandidatePortsForIp(ip: string, instances: Instance[], currentRpcPort?: number): number[] {
+  const cached = loadNodeRpcPort(ip);
+  const matchedInstance = instances.find(i => {
+    const instIp = i.config.virtual_ipv4 ? i.config.virtual_ipv4.split('/')[0].trim() : '';
+    return instIp === ip;
+  });
+  const localInstancePort = matchedInstance?.rpcPort;
+  const configuredPorts = instances.map(i => i.rpcPort).filter((p): p is number => typeof p === 'number' && p > 0);
+  const standardRange = [15888, 15889, 15890, 15891, 15892, 15893, 15894, 15895];
+
+  return Array.from(new Set([
+    ...(localInstancePort ? [localInstancePort] : []),
+    ...(cached ? [cached] : []),
+    ...(currentRpcPort ? [currentRpcPort] : []),
+    ...configuredPorts,
+    ...standardRange,
+  ]));
+}
+
 interface runtimeInfo { available: boolean; version: string; core_path?: string }
 
-interface KernelUpdateInfo { current_version: string; latest_version?: string | null; asset_name?: string | null; update_available: boolean; error?: string | null }
+interface KernelUpdateInfo { current_version: string; latest_version?: string | null; asset_name?: string | null; update_available: boolean; available_versions?: string[] | null; error?: string | null }
 interface KernelUpdateProgress { task_id?: string | null; phase: string; downloaded_bytes: number; total_bytes?: number | null; percent?: number | null; current_file?: string | null; message: string; error?: string | null }
-interface KernelUpdateTaskResponse { task_id?: string | null; status?: string; progress?: Partial<KernelUpdateProgress> | null; result?: Partial<KernelUpdateProgress> | null; error?: string | { message?: string } | null }
-const KERNEL_TERMINAL_PHASES = ['completed', 'failed'];
-const KERNEL_TERMINAL_STATUSES = ['completed', 'complete', 'success', 'succeeded', 'failed', 'error'];
+interface KernelUpdateTaskResponse { task_id?: string | null; status?: string; phase?: string; downloaded_bytes?: number; total_bytes?: number | null; percent?: number | null; message?: string; progress?: Partial<KernelUpdateProgress> | null; result?: Partial<KernelUpdateProgress> | null; error?: string | { message?: string } | null }
+const KERNEL_TERMINAL_PHASES = ['completed', 'failed', 'cancelled'];
+const KERNEL_TERMINAL_STATUSES = ['completed', 'complete', 'success', 'succeeded', 'failed', 'error', 'cancelled'];
 const isKernelTerminal = (value?: string | null): boolean => !!value && KERNEL_TERMINAL_STATUSES.includes(value.toLowerCase());
 const kernelErrorText = (error: KernelUpdateTaskResponse['error']): string | undefined => typeof error === 'string' ? error : error?.message;
 const mergeKernelProgress = (base: KernelUpdateProgress | null, update: Partial<KernelUpdateProgress> | null | undefined, taskId?: string | null): KernelUpdateProgress => ({
@@ -54,12 +94,13 @@ const mergeKernelProgress = (base: KernelUpdateProgress | null, update: Partial<
   error: update?.error ?? base?.error, task_id: update?.task_id ?? taskId ?? base?.task_id ?? null,
 });
 const KERNEL_PROXIES = [
-  { value: 'direct', label: '直连' },
-  { value: 'https://ghfast.top', label: 'https://ghfast.top/' },
-  { value: 'https://v6.gh-proxy.org', label: 'https://v6.gh-proxy.org/' },
-  { value: 'https://hk.gh-proxy.org', label: 'https://hk.gh-proxy.org/' },
-  { value: 'https://cdn.gh-proxy.org', label: 'https://cdn.gh-proxy.org/' },
-  { value: 'https://edgeone.gh-proxy.org', label: 'https://edgeone.gh-proxy.org/' },
+  { value: 'direct', label: '直连 (GitHub Official)' },
+  { value: 'https://ghfast.top', label: 'ghfast.top' },
+  { value: 'https://v6.gh-proxy.org', label: 'v6.gh-proxy.org' },
+  { value: 'https://hk.gh-proxy.org', label: 'hk.gh-proxy.org' },
+  { value: 'https://cdn.gh-proxy.org', label: 'cdn.gh-proxy.org' },
+  { value: 'https://edgeone.gh-proxy.org', label: 'edgeone.gh-proxy.org' },
+  { value: 'custom', label: '自定义镜像/代理前缀...' },
 ];
 
 type ServiceRecoveryStep = 'starting' | 'waiting' | 'syncing';
@@ -70,7 +111,7 @@ const SERVICE_RECOVERY_TEXT: Record<ServiceRecoveryStep, string> = {
 };
 
 const KERNEL_PHASE_TEXT: Record<string, string> = {
-  checking: '检查版本', downloading: '下载内核', extracting: '校验并解压', stopping: '停止网络', installing: '替换内核', restarting: '恢复网络', completed: '更新完成', failed: '更新失败',
+  checking: '检查版本', downloading: '下载内核', extracting: '校验并解压', stopping: '停止网络', installing: '替换内核', restarting: '恢复网络', completed: '更新完成', failed: '更新失败', cancelled: '已取消',
 };
 
 // Status persisted in localStorage may be stale after an abnormal exit (the
@@ -122,14 +163,45 @@ export default function App() {
   const [configSaved, setConfigSaved] = useState(false);
   const [kernelUpdate, setKernelUpdate] = useState<KernelUpdateProgress | null>(null);
   const [kernelInfo, setKernelInfo] = useState<KernelUpdateInfo | null>(null);
+  const [availableKernelVersions, setAvailableKernelVersions] = useState<string[]>([]);
+  const [selectedKernelVersion, setSelectedKernelVersion] = useState<string>('');
   const [kernelProxy, setKernelProxy] = useState<string>(() => load('easytier.kernel-update-proxy.v1', 'direct'));
+  const [customKernelProxy, setCustomKernelProxy] = useState<string>(() => load('easytier.custom-kernel-proxy.v1', ''));
+  useEffect(() => { localStorage.setItem('easytier.custom-kernel-proxy.v1', customKernelProxy); }, [customKernelProxy]);
+  const effectiveKernelProxy = kernelProxy === 'custom' ? (customKernelProxy.trim() || 'direct') : kernelProxy;
+
   const [service, setService] = useState<ServiceStatus | null>(null);
+  const [serviceChecking, setServiceChecking] = useState(true);
   const [serviceBusy, setServiceBusy] = useState(false);
   const [serviceResult, setServiceResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [remoteConfigTarget, setRemoteConfigTarget] = useState<{ host: string; port: number; candidatePorts?: number[] } | null>(null);
   const serviceMode = service?.running === true && service?.healthy !== false;
   const serviceInstalled = service?.installed === true;
   const logTimer = useRef<number | null>(null);
   const kernelTaskId = kernelUpdate?.task_id ?? null;
+
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+
+  const showToast = (message: string) => {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    setToast(message);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 2200);
+  };
+
+  const copyText = async (text: string, label?: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast(label ? `✓ ${label}` : `✓ 已复制: ${text}`);
+    } catch (e) {
+      showToast(`复制失败：${String(e)}`);
+    }
+  };
 
   const current = useMemo(() => instances.find(i => i.id === activeId) ?? instances[0], [instances, activeId]);
   const runningNow = current?.status === 'running';
@@ -162,22 +234,279 @@ export default function App() {
     return peers.filter(peer => !String(peer.hostname ?? '').toLowerCase().startsWith('publicserver'));
   }, [current, peers, showPeerNodes]);
 
+  // 1-Second real-time traffic sampler for smooth area chart (restored from sessionStorage across refreshes)
+  const [trafficHistory, setTrafficHistory] = useState<TrafficSample[]>(() => {
+    try {
+      const raw = sessionStorage.getItem('easytier.traffic_history.v1');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length === 30) {
+          const latestTime = parsed[29]?.time ?? 0;
+          if (Date.now() - latestTime < 60_000) {
+            return parsed;
+          }
+        }
+      }
+    } catch { /* ignore */ }
+    return Array.from({ length: 30 }, (_, i) => ({ time: Date.now() - (29 - i) * 1000, rxSpeed: 0, txSpeed: 0 }));
+  });
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('easytier.traffic_history.v1', JSON.stringify(trafficHistory));
+    } catch { /* ignore */ }
+  }, [trafficHistory]);
+  const [currentRxSpeed, setCurrentRxSpeed] = useState(0);
+  const [currentTxSpeed, setCurrentTxSpeed] = useState(0);
+  const lastTotalBytesRef = useRef<{ rx: number; tx: number; time: number } | null>(null);
+
+  useEffect(() => {
+    if (!runningNow || !current?.rpcPort) {
+      setCurrentRxSpeed(0);
+      setCurrentTxSpeed(0);
+      lastTotalBytesRef.current = null;
+      return;
+    }
+
+    let alive = true;
+    const sample = async () => {
+      try {
+        const snap = await invoke<InstanceSnapshot>('status_query', { port: current.rpcPort });
+        if (!alive) return;
+        let totalRx = 0;
+        let totalTx = 0;
+        for (const p of snap.peers) {
+          if (p.cost !== 'Local') {
+            totalRx += parseHumanBytes(p.rx_bytes);
+            totalTx += parseHumanBytes(p.tx_bytes);
+          }
+        }
+        const now = Date.now();
+        const last = lastTotalBytesRef.current;
+        lastTotalBytesRef.current = { rx: totalRx, tx: totalTx, time: now };
+        if (last) {
+          const dt = Math.max(0.4, (now - last.time) / 1000);
+          const rSpeed = totalRx >= last.rx ? (totalRx - last.rx) / dt : 0;
+          const tSpeed = totalTx >= last.tx ? (totalTx - last.tx) / dt : 0;
+          setCurrentRxSpeed(rSpeed);
+          setCurrentTxSpeed(tSpeed);
+          setTrafficHistory(prev => [...prev.slice(1), { time: now, rxSpeed: rSpeed, txSpeed: tSpeed }]);
+        }
+      } catch {
+        // RPC blip
+      }
+    };
+
+    void sample();
+    const timer = window.setInterval(() => void sample(), 1000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [runningNow, current?.id, current?.rpcPort]);
+
+  const peakSpeed = useMemo(
+    () => Math.max(0, ...trafficHistory.map(s => Math.max(s.rxSpeed, s.txSpeed))),
+    [trafficHistory]
+  );
+
+  const activeVirtualIp = useMemo(() => {
+    const ip = node?.ipv4_addr || current?.config?.virtual_ipv4;
+    return ip ? ip.split('/')[0].trim() : null;
+  }, [node?.ipv4_addr, current?.config?.virtual_ipv4]);
+
+  useEffect(() => {
+    if (!current) return;
+    void invoke('update_tray_status', {
+      payload: {
+        running: current.status === 'running',
+        instance_id: current.id,
+        network_name: current.name,
+        virtual_ip: activeVirtualIp,
+        peer_count: peers.length,
+        rx_speed: currentRxSpeed > 0 ? formatSpeed(currentRxSpeed) : '0 B/s',
+        tx_speed: currentTxSpeed > 0 ? formatSpeed(currentTxSpeed) : '0 B/s',
+      },
+    }).catch(() => {});
+  }, [current?.status, current?.id, current?.name, activeVirtualIp, peers.length]);
+
+  // Inline double-click rename state
+  const [inlineRename, setInlineRename] = useState<{
+    peerId: number | string;
+    originalName: string;
+    currentName: string;
+    host: string;
+    saving: boolean;
+  } | null>(null);
+
+  const submitRename = async () => {
+    if (!inlineRename || inlineRename.saving) return;
+    const newName = inlineRename.currentName.trim();
+    if (!newName) {
+      showToast('主机名不能为空');
+      setInlineRename(null);
+      return;
+    }
+    if (newName === inlineRename.originalName) {
+      setInlineRename(null);
+      return;
+    }
+    setInlineRename(prev => (prev ? { ...prev, saving: true } : null));
+
+    const candidatePorts = getCandidatePortsForIp(inlineRename.host, instances, current.rpcPort);
+
+    let success = false;
+    let matchedPort: number | null = null;
+    let lastErr: unknown = null;
+
+    const probeAndPatch = async (port: number) => {
+      const disc = await invoke<{ instance_id: string; hostname: string; virtual_ip: string }>(
+        'remote_config_discover',
+        {
+          host: inlineRename.host,
+          port,
+          virtualIp: inlineRename.host,
+        }
+      );
+      await invoke('remote_config_patch', {
+        host: inlineRename.host,
+        port,
+        instanceId: disc.instance_id,
+        patch: { hostname: newName },
+      });
+      return port;
+    };
+
+    try {
+      matchedPort = await Promise.any(candidatePorts.map(p => probeAndPatch(p)));
+      success = true;
+    } catch (e) {
+      lastErr = e;
+    }
+
+    if (!success) {
+      const input = window.prompt(
+        `未能通过常见端口（已尝试 ${candidatePorts.slice(0, 5).join(', ')} 等）连接到 ${inlineRename.host} 的 RPC。\n\n若该节点使用了自定义 RPC 端口，请输入端口号（留空取消）：`,
+        '15888'
+      );
+      if (input) {
+        const customPort = parseInt(input.trim(), 10);
+        if (customPort > 0 && customPort <= 65535) {
+          try {
+            matchedPort = await probeAndPatch(customPort);
+            success = true;
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+      }
+    }
+
+    if (success && matchedPort) {
+      saveNodeRpcPort(inlineRename.host, matchedPort);
+      // Synchronize to local instance config if target is a local instance!
+      setInstances(prev => {
+        const next = prev.map(inst => {
+          const cleanVirtual = inst.config.virtual_ipv4 ? inst.config.virtual_ipv4.split('/')[0].trim() : '';
+          const isMatch = inst.rpcPort === matchedPort
+            || cleanVirtual === inlineRename.host
+            || (inst.id === current.id && (node?.hostname === inlineRename.originalName || !inlineRename.host));
+          if (isMatch) {
+            const updated = {
+              ...inst,
+              config: {
+                ...inst.config,
+                hostname: newName,
+              },
+            };
+            if (serviceMode) {
+              void serviceRequest('sync_instance', {
+                instance_id: updated.id,
+                name: updated.name,
+                config_toml: encodeTOML(updated.config),
+                rpc_port: updated.rpcPort,
+                auto_start: updated.autoStart ?? false,
+                desired_state: updated.status === 'running' ? 'running' : 'stopped',
+                remote_manage_enabled: updated.remoteManageEnabled ?? false,
+                rpc_whitelist_cidrs: updated.rpcWhitelistCidrs ?? [],
+              }).catch(() => {});
+            }
+            return updated;
+          }
+          return inst;
+        });
+        localStorage.setItem('easytier.instances.v2', JSON.stringify(next));
+        return next;
+      });
+
+      // Optimistically update current view
+      setStatusByInstance(prev => {
+        const cur = prev[current.id];
+        if (!cur) return prev;
+        return {
+          ...prev,
+          [current.id]: {
+            ...cur,
+            peers: cur.peers.map(p => (p.hostname === inlineRename.originalName ? { ...p, hostname: newName } : p)),
+            routes: cur.routes.map(r => (r.hostname === inlineRename.originalName ? { ...r, hostname: newName } : r)),
+          },
+        };
+      });
+      showToast(`✓ 已将设备改名为「${newName}」，并同步至组网配置 (RPC :${matchedPort})`);
+      setInlineRename(null);
+    } else {
+      showToast(`改名失败：无法连接 ${inlineRename.host} RPC。请确认对端已开启「允许远程管理」且端口配置正确。${lastErr ? ` (${String(lastErr)})` : ''}`);
+      setInlineRename(null);
+    }
+  };
+
   useEffect(() => { localStorage.setItem('easytier.instances.v2', JSON.stringify(instances)); }, [instances]);
   useEffect(() => { if (current) localStorage.setItem('easytier.active.v2', current.id); }, [current]);
   useEffect(() => { invoke<runtimeInfo>('detect_runtime', {}).then(v => setRuntime({ ...v, core_path: v.core_path ?? 'core/easytier-core.exe' })).catch(() => setRuntime(null)); }, []);
+  const wasServiceModeRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (serviceChecking) return;
+    if (serviceMode) {
+      if (wasServiceModeRef.current === false) {
+        showToast('✓ 已连接后台服务，当前为服务模式');
+      }
+      wasServiceModeRef.current = true;
+    } else {
+      if (wasServiceModeRef.current === true) {
+        showToast('⚠ 后台服务已断开，当前为兼容模式');
+      }
+      wasServiceModeRef.current = false;
+    }
+  }, [serviceMode, serviceChecking]);
+
+  useEffect(() => {
+    // 3 seconds after launch, trigger process tree working set trim to drop physical RAM usage
+    const timer = setTimeout(() => {
+      void invoke('trim_memory').catch(() => {});
+    }, 3200);
+    const onBlur = () => {
+      void invoke('trim_memory').catch(() => {});
+    };
+    window.addEventListener('blur', onBlur);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, []);
+
   const refreshService = async (opts?: { skipAutoStart?: boolean }) => {
     try {
       const installed = await invoke<{ installed: boolean; running: boolean; message?: string }>('query_service_installation').catch(e => ({ installed: false, running: false, message: String(e) }));
       if (!installed.installed) {
         setService({ installed: false, running: false, message: installed.message });
+        setServiceChecking(false);
         return;
       }
       if (!installed.running) {
-        setService({ installed: true, running: false, message: '正在启动后台服务…' });
         // Auto-start in the background so the UI never waits on UAC/SCM.
-        // If the service starts but immediately stops (stale registration,
-        // moved exe, leftover state), repair it once automatically.
         if (!opts?.skipAutoStart && !sessionStorage.getItem('easytier.service-repaired.v1')) {
+          setServiceChecking(true);
+          setService({ installed: true, running: false, message: '正在自动启动后台服务…' });
           void (async () => {
             try {
               await invoke('start_service');
@@ -192,13 +521,18 @@ export default function App() {
               await refreshService({ skipAutoStart: true });
             } catch {
               setService({ installed: true, running: false, message: '服务已安装但启动失败（可在设置中重试或修复）。' });
+              setServiceChecking(false);
             }
           })();
+        } else {
+          setService({ installed: true, running: false, message: '后台服务未运行' });
+          setServiceChecking(false);
         }
         return;
       }
       const next = await withScmGuardedStatus();
       setService({ ...next, installed: true, running: true });
+      setServiceChecking(false);
       if (next.running && next.healthy !== false) {
         const states = await serviceRequest<ServiceInstanceState[]>('list_instances');
         setInstances(xs => {
@@ -228,15 +562,26 @@ export default function App() {
         });
       }
     } catch (e) {
-      // SCM says the service is up but IPC keeps failing: a hiccup, not a
-      // dead service — flipping to compatibility mode (and reinstalling the
-      // service) here is what used to report "服务不可用" out of nowhere.
       const sc = await invoke<{ installed: boolean; running: boolean }>('query_service_installation').catch(() => null);
       if (sc?.installed && sc?.running) {
-        setService({ installed: true, running: true, healthy: true, message: '后台服务短暂无响应，正在自动重试…' });
+        setService({ installed: true, running: true, healthy: false, message: '后台服务无响应，正在尝试自动修复…' });
+        if (!sessionStorage.getItem('easytier.service-repaired-zombie.v1')) {
+          sessionStorage.setItem('easytier.service-repaired-zombie.v1', '1');
+          void (async () => {
+            try {
+              await invoke('repair_service');
+              await new Promise(r => setTimeout(r, 1500));
+              await refreshService({ skipAutoStart: true });
+            } catch (err) {
+              setService({ installed: true, running: false, healthy: false, message: `服务自动修复失败：${String(err)}（可在设置中重试）` });
+            }
+          })();
+        }
         return;
       }
       setService({ installed: false, running: false, message: String(e) });
+    } finally {
+      setServiceChecking(false);
     }
   };
   // service_status via the named pipe, retried while SCM still reports the
@@ -250,7 +595,7 @@ export default function App() {
         lastError = e;
         const sc = await invoke<{ installed: boolean; running: boolean }>('query_service_installation').catch(() => null);
         if (!sc?.installed || !sc?.running) throw e;
-        await new Promise(r => setTimeout(r, 800));
+        await new Promise(r => setTimeout(r, 300));
       }
     }
     throw lastError;
@@ -272,7 +617,7 @@ export default function App() {
     setServiceRecovery('starting');
     setService(s => (s ? { ...s, running: false, message: '检测到后台服务异常退出，正在自动重新拉起…' } : s));
     try {
-      await invoke('start_service');
+      await invoke('repair_service');
       setServiceRecovery('waiting');
       let ready = false;
       for (let i = 0; i < 30; i++) {
@@ -306,6 +651,16 @@ export default function App() {
           if (Date.now() - lastServiceHealAt.current > 60_000) {
             lastServiceHealAt.current = Date.now();
             void runServiceRecovery();
+          }
+        } else if (q.installed && q.running) {
+          try {
+            await getServiceStatus();
+          } catch {
+            setService(s => (s ? { ...s, healthy: false, message: '后台服务无响应，正在准备自动恢复…' } : s));
+            if (Date.now() - lastServiceHealAt.current > 60_000) {
+              lastServiceHealAt.current = Date.now();
+              void runServiceRecovery();
+            }
           }
         }
       } catch { /* sc query hiccup — the next tick retries */ }
@@ -391,13 +746,33 @@ export default function App() {
       try {
         const response = await serviceRequest<KernelUpdateTaskResponse>('get_task_status', { task_id: kernelTaskId });
         if (!alive || response.task_id && response.task_id !== kernelTaskId) return;
-        const update = response.progress || response.result;
+        const update: Partial<KernelUpdateProgress> = response.progress || (response.phase ? {
+          phase: response.phase,
+          downloaded_bytes: response.downloaded_bytes ?? 0,
+          total_bytes: response.total_bytes,
+          percent: response.percent,
+          message: response.message || '',
+          error: kernelErrorText(response.error),
+        } : response.result) || {};
         const status = response.status?.toLowerCase();
         const terminal = isKernelTerminal(status) || isKernelTerminal(update?.phase);
-        const phase = terminal ? (status === 'failed' || status === 'error' || update?.phase === 'failed' ? 'failed' : 'completed') : update?.phase;
+        const phase = terminal ? (status === 'failed' || status === 'error' || update?.phase === 'failed' ? 'failed' : status === 'cancelled' || update?.phase === 'cancelled' ? 'cancelled' : 'completed') : update?.phase;
         const next = mergeKernelProgress(kernelUpdate, { ...update, ...(phase ? { phase } : {}), ...(kernelErrorText(response.error) ? { error: kernelErrorText(response.error) } : {}) }, kernelTaskId);
         setKernelUpdate(next);
-        if (!terminal && alive) timer = window.setTimeout(() => void poll(), 1000);
+        if (terminal) {
+          if (phase === 'completed') {
+            void invoke<KernelUpdateInfo>('check_kernel_update', { proxy: effectiveKernelProxy })
+              .then(fresh => {
+                setKernelInfo(fresh);
+                if (fresh.available_versions) setAvailableKernelVersions(fresh.available_versions);
+              })
+              .catch(() => {});
+            void refreshService();
+            showToast('✓ EasyTier 内核已成功更新/切换');
+          }
+        } else if (alive) {
+          timer = window.setTimeout(() => void poll(), 1000);
+        }
       } catch {
         if (alive) timer = window.setTimeout(() => void poll(), 1500);
       }
@@ -405,11 +780,20 @@ export default function App() {
     void poll();
     return () => { alive = false; if (timer != null) window.clearTimeout(timer); };
   }, [serviceMode, kernelTaskId, kernelUpdate?.phase]);
+  const kernelCheckedRef = useRef(false);
   useEffect(() => {
-    void invoke<KernelUpdateInfo>('check_kernel_update', { proxy: kernelProxy }).then(setKernelInfo).catch(e => setKernelInfo({ current_version: runtime?.version ?? 'unknown', update_available: false, error: String(e) }));
-  // Runtime detection and the initial update check intentionally run once per app launch.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (tab !== 'settings' || kernelCheckedRef.current) return;
+    kernelCheckedRef.current = true;
+    void invoke<KernelUpdateInfo>('check_kernel_update', { proxy: kernelProxy })
+      .then(info => {
+        setKernelInfo(info);
+        if (info.available_versions && info.available_versions.length > 0) {
+          setAvailableKernelVersions(info.available_versions);
+          if (info.latest_version) setSelectedKernelVersion(`v${info.latest_version}`);
+        }
+      })
+      .catch(e => setKernelInfo({ current_version: runtime?.version ?? 'unknown', update_available: false, error: String(e) }));
+  }, [tab, kernelProxy, runtime?.version]);
 
   // Poll peer/route status while an instance is running. Self-scheduling
   // timeout: the next round starts only after the previous one settles, so a
@@ -449,17 +833,34 @@ export default function App() {
         if (!snapshot) continue;
         for (const p of snapshot.peers) {
           if (p.cost === 'Local') continue;
-          const key = `${id}:${p.hostname}:${p.ipv4 ?? ''}`;
+          const normalizedIp = (p.ipv4 ?? '').split('/')[0].trim();
+          const key = `${id}:${p.hostname || p.id || 'peer'}:${normalizedIp}`;
           const rx = parseHumanBytes(p.rx_bytes);
           const tx = parseHumanBytes(p.tx_bytes);
           const last = lastPeerCounters.current[key];
           lastPeerCounters.current[key] = { rx, tx };
-          if (!last) continue; // first sighting: history unknown, start from here
-          const drx = rx >= last.rx ? rx - last.rx : rx; // counter reset → treat as fresh
-          const dtx = tx >= last.tx ? tx - last.tx : tx;
-          if (drx === 0 && dtx === 0) continue;
+
           setTrafficTotals(m => {
-            const cur = m[key] ?? { rx: 0, tx: 0 };
+            const cur = m[key];
+            if (!cur) {
+              // First time seeing this peer: seed with existing cumulative bytes from core!
+              const nextM = { ...m, [key]: { rx, tx } };
+              localStorage.setItem('easytier.traffic.v1', JSON.stringify(nextM));
+              return nextM;
+            }
+            if (!last) {
+              // Page refreshed, but we have cur recorded in localStorage:
+              // If core's rx > cur.rx, count the difference
+              const drx = rx > cur.rx ? rx - cur.rx : 0;
+              const dtx = tx > cur.tx ? tx - cur.tx : 0;
+              if (drx === 0 && dtx === 0) return m;
+              const nextM = { ...m, [key]: { rx: cur.rx + drx, tx: cur.tx + dtx } };
+              localStorage.setItem('easytier.traffic.v1', JSON.stringify(nextM));
+              return nextM;
+            }
+            const drx = rx >= last.rx ? rx - last.rx : rx;
+            const dtx = tx >= last.tx ? tx - last.tx : tx;
+            if (drx === 0 && dtx === 0) return m;
             const nextM = { ...m, [key]: { rx: cur.rx + drx, tx: cur.tx + dtx } };
             localStorage.setItem('easytier.traffic.v1', JSON.stringify(nextM));
             return nextM;
@@ -544,47 +945,94 @@ export default function App() {
   const toggle = async () => {
     if (kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)) return;
     const running = current.status === 'running';
-    if (!running && !serviceMode && isElevated === false && !elevationNoticeShown) {
-      const message = '当前为普通权限运行，兼容模式启动网络可能失败。请右键客户端并选择“以管理员身份运行”。';
-      addLog(`权限提示：${message}`);
-      await appAlert(message);
-      sessionStorage.setItem('easytier.elevation-notice.v1', '1');
-      setElevationNoticeShown(true);
+    if (!running && !serviceMode && isElevated === false) {
+      const ask = await appConfirm(
+        '【权限提示】兼容模式需要在 Windows 中创建虚拟网卡 (Wintun) 与加载驱动，必须以管理员身份运行。\n\n检测到当前客户端运行在普通用户权限下，可能导致虚拟网卡创建失败（exit code 1）。\n\n是否立即以管理员身份重新启动客户端？'
+      );
+      if (ask) {
+        try {
+          await invoke('restart_as_admin');
+          return;
+        } catch (e) {
+          addLog(`请求管理员权限启动失败：${String(e)}，请手动右键客户端选择“以管理员身份运行”`);
+        }
+      }
     }
     if (!running) {
-      // Pre-flight: detect listener port conflicts between instances so the
-      // user can change the port instead of hitting an opaque core failure.
+      // 1. Auto-resolve RPC port conflict with other running instances or host system
+      let assignedRpc = current.rpcPort;
+      const otherRunning = instances.filter(i => i.id !== current.id && i.status === 'running');
+      const occupiedRpcPorts = new Set(otherRunning.map(i => i.rpcPort));
+      while (occupiedRpcPorts.has(assignedRpc) || (await invoke<boolean>('is_port_in_use', { port: assignedRpc }).catch(() => false))) {
+        assignedRpc++;
+      }
+      if (assignedRpc !== current.rpcPort) {
+        addLog(`[${current.name}] 探测到 RPC 端口 ${current.rpcPort} 已被占用，已自动调整为空闲端口 ${assignedRpc}`);
+        current.rpcPort = assignedRpc;
+        setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, rpcPort: assignedRpc } : i)));
+      }
+
+      // 2. Pre-flight: detect listener port conflicts and offer 1-click auto-fix to dynamic port 0
       const portOf = (url: string): number | null => {
         const m = url.match(/:(\d+)(?:\/.*)?$/);
         return m ? parseInt(m[1], 10) : null;
       };
       const myPorts = current.config.listener_urls.map(portOf).filter((p): p is number => p != null && p !== 0);
       const conflicts: string[] = [];
+      const conflictPortSet = new Set<number>();
       for (const other of instances) {
         if (other.id === current.id || other.status !== 'running') continue;
         const otherPorts = new Set(other.config.listener_urls.map(portOf).filter((p): p is number => p != null));
         for (const p of myPorts) {
-          if (otherPorts.has(p)) conflicts.push(`端口 ${p} 已被实例「${other.name}」占用`);
+          if (otherPorts.has(p)) {
+            conflicts.push(`端口 ${p} 已被运行中的实例「${other.name}」占用`);
+            conflictPortSet.add(p);
+          }
         }
       }
-      const systemConflicts: string[] = [];
       for (const p of myPorts) {
+        if (conflictPortSet.has(p)) continue;
         try {
           const busy = await invoke<boolean>('is_port_in_use', { port: p });
-          if (busy) systemConflicts.push(`端口 ${p} 已被系统其它程序占用`);
+          if (busy) {
+            conflicts.push(`端口 ${p} 已被系统其它程序或后台服务占用`);
+            conflictPortSet.add(p);
+          }
         } catch { /* check unavailable — skip */ }
       }
-      const all = [...new Set([...conflicts, ...systemConflicts])];
-      if (all.length) {
-        if (!(await appConfirm(`监听器端口冲突：\n\n${all.join('\n')}\n\n建议修改本实例监听器端口（或改用端口 0 自动分配）后再启动。仍要继续吗？`))) return;
+      if (conflictPortSet.size > 0) {
+        const autoFix = await appConfirm(
+          `监听器端口冲突：\n\n${conflicts.join('\n')}\n\n是否自动将冲突端口转换为自动分配端口（端口 0）并立即启动？\n（点击「确定」将自动切换到动态空闲端口避免启动冲突，点击「取消」返回手动修改）`
+        );
+        if (autoFix) {
+          const updatedUrls = current.config.listener_urls.map(url => {
+            const p = portOf(url);
+            if (p != null && conflictPortSet.has(p)) {
+              return url.replace(/:(\d+)(?:\/.*)?$/, ':0');
+            }
+            return url;
+          });
+          current.config.listener_urls = updatedUrls;
+          setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, config: { ...i.config, listener_urls: updatedUrls } } : i)));
+          addLog(`[${current.name}] 已自动将冲突监听端口调整为动态端口 0`);
+        } else {
+          return;
+        }
       }
-      // TUN adapter names must be unique machine-wide: two cores claiming the
-      // same dev_name fight over one Wintun adapter (no IP, route flapping).
-      if (current.config.dev_name.trim() && instances.some(i => i.id !== current.id && i.config.dev_name === current.config.dev_name)) {
-        const unique = `et_${crypto.randomUUID().replace(/-/g, '').slice(0, 6)}`;
+
+      // 3. TUN adapter names must be unique machine-wide: two cores claiming the
+      // same dev_name fight over one Wintun adapter (Failed to create adapter error).
+      const otherDevNames = new Set(
+        instances
+          .filter(i => i.id !== current.id)
+          .map(i => i.config.dev_name?.trim())
+          .filter(Boolean)
+      );
+      if (!current.config.dev_name?.trim() || otherDevNames.has(current.config.dev_name.trim())) {
+        const unique = `et_${current.id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 6)}`;
         setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, config: { ...i.config, dev_name: unique } } : i)));
         current.config.dev_name = unique;
-        addLog(`[${current.name}] TUN 设备名与其它实例冲突，已自动改为 ${unique}`);
+        addLog(`[${current.name}] TUN 虚拟网卡名已自动设为独立设备名 ${unique}`);
       }
     }
     setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, status: running ? 'stopping' : 'starting' } : i)));
@@ -645,6 +1093,57 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    let unlistenCopy: UnlistenFn | undefined;
+    let unlistenToggle: UnlistenFn | undefined;
+    let unlistenResume: UnlistenFn | undefined;
+
+    void listen('tray-copy-ip', () => {
+      if (activeVirtualIp) {
+        void navigator.clipboard.writeText(activeVirtualIp);
+        showToast(`✓ 已从托盘复制虚拟 IP: ${activeVirtualIp}`);
+      } else {
+        showToast('虚拟 IP 尚未分配或网络未运行');
+      }
+    }).then(fn => { unlistenCopy = fn; });
+
+    void listen('tray-toggle-network', () => {
+      void toggle();
+    }).then(fn => { unlistenToggle = fn; });
+
+    void listen('system-power-resumed', () => {
+      console.log('[Power] 系统自休眠唤醒，触发网络自愈感知...');
+      showToast('⚡ 检测到系统休眠唤醒，正在自愈重连 EasyTier 网络...');
+      if (serviceMode) {
+        void refreshService();
+      } else {
+        for (const inst of instances) {
+          if (inst.status === 'running') {
+            void invoke<{ status: Status; error?: string }>('get_instance_state', { id: inst.id }).then(st => {
+              if (st.status !== 'running') {
+                showToast(`正在自动恢复网络「${inst.name}」...`);
+                const toml = encodeTOML(inst.config);
+                void invoke('start_instance', {
+                  id: inst.id,
+                  config: toml,
+                  rpcPortal: inst.remoteManageEnabled ? undefined : `127.0.0.1:${inst.rpcPort}`,
+                  remoteManageEnabled: inst.remoteManageEnabled ?? false,
+                  rpcWhitelistCidrs: inst.rpcWhitelistCidrs ?? [],
+                }).catch(() => {});
+              }
+            }).catch(() => {});
+          }
+        }
+      }
+    }).then(fn => { unlistenResume = fn; });
+
+    return () => {
+      if (unlistenCopy) unlistenCopy();
+      if (unlistenToggle) unlistenToggle();
+      if (unlistenResume) unlistenResume();
+    };
+  }, [activeVirtualIp, toggle, serviceMode, instances]);
+
   const importToml = async (text: string) => {
     try {
       const config = decodeTOML(text);
@@ -671,13 +1170,15 @@ export default function App() {
     }
     const text = encodeTOML(current.config, true);
     try {
-      if (copy) await navigator.clipboard.writeText(text);
-      else {
+      if (copy) {
+        await copyText(text, 'TOML 已复制到剪贴板');
+      } else {
         const a = document.createElement('a');
         a.href = URL.createObjectURL(new Blob([text], { type: 'application/toml' }));
         a.download = `${current.name || 'easytier'}.toml`;
         a.click();
         URL.revokeObjectURL(a.href);
+        showToast('✓ TOML 已导出为文件');
       }
       addLog(copy ? 'TOML 已复制到剪贴板' : 'TOML 已导出为文件');
     } catch (e) { await appAlert(`导出失败：${String(e)}`); }
@@ -720,44 +1221,99 @@ export default function App() {
     setTomlError(null);
   };
 
-  const checkKernelUpdate = async () => {
-    setKernelInfo(null);
-    try { setKernelInfo(await invoke<KernelUpdateInfo>('check_kernel_update', { proxy: kernelProxy })); }
-    catch (e) { setKernelInfo({ current_version: runtime?.version ?? 'unknown', update_available: false, error: String(e) }); }
+  const cancelKernelUpdate = async () => {
+    try {
+      if (serviceMode) {
+        await serviceRequest('cancel_kernel_update').catch(() => {});
+      }
+      await invoke('cancel_kernel_update').catch(() => {});
+      setKernelUpdate({
+        phase: 'cancelled',
+        downloaded_bytes: 0,
+        total_bytes: null,
+        percent: 0,
+        message: '已取消内核更新',
+      });
+      showToast('✓ 已取消内核更新');
+    } catch (e) {
+      showToast(`取消失败：${String(e)}`);
+    }
   };
 
-  const updateKernel = async () => {
-    if (kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)) return;
-    if (!kernelInfo?.update_available) return;
-    if (!(await appConfirm(`将更新 EasyTier 内核至 v${kernelInfo.latest_version}，更新期间会停止并自动重启当前运行中的网络。继续吗？`))) return;
+  const checkKernelUpdate = async () => {
+    setKernelInfo(null);
+    try {
+      const res = await invoke<KernelUpdateInfo>('check_kernel_update', { proxy: effectiveKernelProxy });
+      setKernelInfo(res);
+      if (res.available_versions && res.available_versions.length > 0) {
+        setAvailableKernelVersions(res.available_versions);
+        if (!selectedKernelVersion) setSelectedKernelVersion(res.available_versions[0]);
+      } else {
+        const list = await invoke<string[]>('list_kernel_versions', { proxy: effectiveKernelProxy });
+        if (list.length > 0) {
+          setAvailableKernelVersions(list);
+          if (!selectedKernelVersion) setSelectedKernelVersion(list[0]);
+        }
+      }
+    } catch (e) {
+      setKernelInfo({ current_version: runtime?.version ?? 'unknown', update_available: false, error: String(e) });
+    }
+  };
+
+  const switchKernel = async (targetVer?: string) => {
+    if (kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase)) return;
+    const targetTag = targetVer || selectedKernelVersion || (kernelInfo?.latest_version ? `v${kernelInfo.latest_version}` : undefined);
+    if (!targetTag) return;
+    if (!(await appConfirm(`将切换/更新 EasyTier 内核至 ${targetTag}，操作期间会停止并自动重启当前运行中的网络。继续吗？`))) return;
     const runningInstances = instances.filter(i => i.status === 'running').map(i => ({ id: i.id, config: encodeTOML(i.config), rpc_port: i.rpcPort, remote_manage_enabled: i.remoteManageEnabled ?? false, rpc_whitelist_cidrs: i.rpcWhitelistCidrs ?? [] }));
-    setKernelUpdate({ phase: 'checking', downloaded_bytes: 0, total_bytes: null, percent: 0, message: '正在准备更新' });
+    setKernelUpdate({ phase: 'checking', downloaded_bytes: 0, total_bytes: null, percent: 0, message: `正在准备切换至 ${targetTag}` });
     try {
       let serviceTaskTerminal = false;
       if (serviceMode) {
-        const response = await serviceRequest<KernelUpdateTaskResponse>('update_kernel', { proxy: kernelProxy });
+        const response = await serviceRequest<KernelUpdateTaskResponse>('update_kernel', { proxy: effectiveKernelProxy, target_version: targetTag });
         const taskId = response.task_id;
-        const update = response.progress || response.result;
+        const update: Partial<KernelUpdateProgress> = response.progress || (response.phase ? {
+          phase: response.phase,
+          downloaded_bytes: response.downloaded_bytes ?? 0,
+          total_bytes: response.total_bytes,
+          percent: response.percent,
+          message: response.message || '',
+          error: kernelErrorText(response.error),
+        } : response.result) || {};
         const status = response.status?.toLowerCase();
         serviceTaskTerminal = isKernelTerminal(status) || isKernelTerminal(update?.phase);
-        const phase = serviceTaskTerminal ? (status === 'failed' || status === 'error' || update?.phase === 'failed' ? 'failed' : 'completed') : update?.phase;
+        const phase = serviceTaskTerminal ? (status === 'failed' || status === 'error' || update?.phase === 'failed' ? 'failed' : status === 'cancelled' || update?.phase === 'cancelled' ? 'cancelled' : 'completed') : update?.phase;
         setKernelUpdate(currentProgress => mergeKernelProgress(currentProgress, {
           ...update,
           ...(phase ? { phase } : {}),
           ...(kernelErrorText(response.error) ? { error: kernelErrorText(response.error) } : {}),
         }, taskId));
       } else {
-        await invoke<KernelUpdateInfo>('update_kernel', { proxy: kernelProxy, instances: runningInstances });
+        await invoke<KernelUpdateInfo>('update_kernel', { proxy: effectiveKernelProxy, targetVersion: targetTag, instances: runningInstances });
       }
       if (!serviceMode || serviceTaskTerminal) {
-        setKernelInfo(await invoke<KernelUpdateInfo>('check_kernel_update', { proxy: kernelProxy }));
+        const fresh = await invoke<KernelUpdateInfo>('check_kernel_update', { proxy: effectiveKernelProxy });
+        setKernelInfo(fresh);
+        if (fresh.available_versions) setAvailableKernelVersions(fresh.available_versions);
         if (serviceMode) await refreshService();
         else setInstances(xs => xs.map(i => runningInstances.some(r => r.id === i.id) ? { ...i, status: 'running' } : i));
+        showToast(`✓ 内核已成功切换至 ${targetTag}`);
       }
     } catch (e) {
-      setKernelUpdate({ phase: 'failed', downloaded_bytes: 0, total_bytes: null, percent: 0, message: '内核更新失败', error: String(e) });
+      const errStr = String(e);
+      const isCancel = errStr.includes('取消');
+      setKernelUpdate({
+        phase: isCancel ? 'cancelled' : 'failed',
+        downloaded_bytes: 0,
+        total_bytes: null,
+        percent: 0,
+        message: isCancel ? '内核切换已取消' : '内核切换失败',
+        error: isCancel ? undefined : errStr,
+      });
     }
   };
+
+  const updateKernel = () => switchKernel();
 
   if (!current) return null;
   const running = current.status === 'running';
@@ -768,27 +1324,14 @@ export default function App() {
   return (
     <>
       <DialogHost />
+      {toast && <div className="app-toast">{toast}</div>}
       <main className="app-shell">
-      {serviceRecovery && (
-        <div className="kernel-progress-global">
-          <div className="kernel-progress-head"><strong>后台服务恢复</strong><span>{SERVICE_RECOVERY_TEXT[serviceRecovery]}</span></div>
-          <div className="kernel-progress-track"><div className="kernel-progress-bar indeterminate" /></div>
-          <small>恢复期间正常运行中的网络不会被重启；服务就绪后将直接接管并同步状态。</small>
-        </div>
-      )}
-      {kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase) && (
-        <div className="kernel-progress-global">
-          <div className="kernel-progress-head"><strong>EasyTier 内核更新</strong><span>{KERNEL_PHASE_TEXT[kernelUpdate.phase] || kernelUpdate.phase}</span></div>
-          <div className="kernel-progress-track"><div className="kernel-progress-bar" style={{ width: `${kernelUpdate.percent ?? 0}%` }} /></div>
-          <small>{kernelUpdate.message}{kernelUpdate.percent != null ? ` · ${kernelUpdate.percent}%` : ''}</small>
-        </div>
-      )}
       <aside>
         <div className="brand"><span className="brand-mark"><img src={easytierLogo} alt="EasyTier" draggable={false} /></span><div><strong>EasyTier</strong><small>Windows Client</small></div></div>
         <div className="section-label">网络实例</div>
         <nav>
           {instances.map(i => (
-            <button className={i.id === current.id ? 'nav-item active' : 'nav-item'} onClick={() => { setActiveId(i.id); setTab('status'); }} key={i.id}>
+            <button className={i.id === current.id ? 'nav-item active' : 'nav-item'} onClick={() => { setActiveId(i.id); if (tab === 'settings') setTab('status'); }} key={i.id}>
               <span className={i.status === 'running' ? 'dot on' : i.status === 'failed' ? 'dot err' : i.status === 'starting' || i.status === 'stopping' ? 'dot connecting' : 'dot'} /><span className="nav-name">{i.name}</span>
               <span className="chevron">›</span>
             </button>
@@ -805,8 +1348,73 @@ export default function App() {
       </aside>
 
       <section className="content">
-        {!serviceMode && <div className="service-banner"><strong>兼容模式</strong><span>后台服务不可用，当前使用 GUI 直接管理内核；启停网络可能需要管理员权限。</span><button className="ghost" onClick={() => setTab('settings')}>查看服务设置</button></div>}
-        {serviceMode && <div className="service-banner service-online"><strong>服务模式</strong><span>EasyTier Service 正在管理网络实例。</span></div>}
+        {serviceRecovery && (
+          <div className="kernel-progress-banner">
+            <div className="kernel-progress-head"><strong>后台服务恢复</strong><span>{SERVICE_RECOVERY_TEXT[serviceRecovery]}</span></div>
+            <div className="kernel-progress-track"><div className="kernel-progress-bar indeterminate" /></div>
+            <small className="kernel-progress-msg">恢复期间正常运行中的网络不会被重启；服务就绪后将直接接管并同步状态。</small>
+          </div>
+        )}
+        {kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase) && tab !== 'settings' && (
+          <div className="kernel-progress-banner">
+            <div className="kernel-progress-head">
+              <strong>EasyTier 内核更新中</strong>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ cursor: 'pointer' }} onClick={() => setTab('settings')}>{KERNEL_PHASE_TEXT[kernelUpdate.phase] || kernelUpdate.phase} · 前往设置 ›</span>
+                <button
+                  type="button"
+                  className="mini-button danger"
+                  style={{ padding: '2px 8px', fontSize: 11 }}
+                  onClick={(e) => { e.stopPropagation(); void cancelKernelUpdate(); }}
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+            <div className="kernel-progress-track">
+              <div className="kernel-progress-bar" style={{ width: `${kernelUpdate.percent ?? 0}%` }} />
+            </div>
+            <small className="kernel-progress-msg">{kernelUpdate.message}{kernelUpdate.percent != null ? ` · ${kernelUpdate.percent}%` : ''}</small>
+          </div>
+        )}
+        <div className="mode-segmented-card">
+          <div className={`mode-module ${serviceMode && !serviceChecking ? 'active' : ''}`}>
+            <div className="mode-module-header">
+              <span className={`mode-badge ${serviceMode && !serviceChecking ? 'on' : 'off'}`}>
+                {serviceChecking ? '⏳ 正在检测' : serviceMode ? '🟢 服务模式 (推荐)' : '⚪ 服务模式'}
+              </span>
+              {serviceMode && !serviceChecking && <span className="mode-tag active-tag">当前运行中</span>}
+            </div>
+            <p className="mode-desc">
+              {serviceChecking
+                ? '正在探测 EasyTier Service 守护服务连接…'
+                : serviceMode
+                ? 'Windows 后台服务守护运行，多用户共享、系统自启且低权限静默管理。'
+                : 'Windows 服务未运行或未安装，当前由兼容模式接管。'}
+            </p>
+          </div>
+
+          <div className={`mode-module ${!serviceMode && !serviceChecking ? 'active' : ''}`}>
+            <div className="mode-module-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className={`mode-badge ${!serviceMode && !serviceChecking ? 'on-compat' : 'off'}`}>
+                  {!serviceMode && !serviceChecking ? '🟠 兼容模式' : '⚪ 兼容模式'}
+                </span>
+                {!serviceMode && !serviceChecking && <span className="mode-tag active-tag compat-tag">当前运行中</span>}
+              </div>
+              {!serviceMode && !serviceChecking && (
+                <button type="button" className="mini-button ghost" onClick={() => setTab('settings')}>
+                  服务设置 ›
+                </button>
+              )}
+            </div>
+            <p className="mode-desc">
+              {!serviceMode && !serviceChecking
+                ? '后台服务不可用，当前由客户端直接管理内核进程；启停需管理员权限。'
+                : '应急备用模式，在后台服务异常时可直接拉起内核子进程。'}
+            </p>
+          </div>
+        </div>
         <header>
           <div>
             <p className="eyebrow">{navItems.find(([t]) => t === tab)?.[1]}</p>
@@ -848,8 +1456,7 @@ export default function App() {
                     const ip = node?.ipv4_addr || current.config.virtual_ipv4;
                     if (ip) {
                       const clean = ip.split('/')[0].trim();
-                      navigator.clipboard.writeText(clean);
-                      addLog(`已复制本机虚拟 IP: ${clean}`);
+                      void copyText(clean, `已复制本机虚拟 IP: ${clean}`);
                     }
                   }}
                 >
@@ -863,6 +1470,35 @@ export default function App() {
               <article><span>路由条目</span><strong>{running ? routes.length : '—'}</strong><small>{running ? '已知网段' : '未运行'}</small></article>
               <article><span>累计收发<button type="button" className="mini-button" style={{ marginLeft: 8, padding: '2px 8px', fontSize: 10 }} onClick={clearTraffic} title="清零累计统计">清零</button></span><strong>{running ? formatBytes(instanceTraffic.rx + instanceTraffic.tx) : '—'}</strong><small>累计值（重连不丢失）</small></article>
             </div>
+
+            {running && (
+              <div className="card traffic-card">
+                <div className="card-title-row">
+                  <div className="traffic-title-left">
+                    <h3 className="card-title">实时网络流量</h3>
+                    <span className="hint-inline">1 秒级采样 · 近 30 秒动态面积图</span>
+                  </div>
+                  <div className="traffic-speed-badges">
+                    <span className="speed-badge rx" title="实时下行速率">
+                      <span className="speed-dot rx" /> ↓ {formatSpeed(currentRxSpeed)}
+                    </span>
+                    <span className="speed-badge tx" title="实时上行速率">
+                      <span className="speed-dot tx" /> ↑ {formatSpeed(currentTxSpeed)}
+                    </span>
+                    <span className="speed-badge peak" title="近 30 秒峰值速率">
+                      ★ 峰值 {formatSpeed(peakSpeed)}
+                    </span>
+                  </div>
+                </div>
+                <TrafficAreaChart
+                  history={trafficHistory}
+                  currentRxSpeed={currentRxSpeed}
+                  currentTxSpeed={currentTxSpeed}
+                  peakSpeed={peakSpeed}
+                />
+              </div>
+            )}
+
             <div className="section-heading"><div><h2>快速操作</h2><p>常用配置与信息入口</p></div></div>
             <div className="config-grid">
               <button className="config-card" onClick={() => setTab('config')}><span className="config-icon"><IconGlobe size={15} /></span><div><b>组网配置</b><small>网络名称、密钥、地址与高级参数</small></div><span>›</span></button>
@@ -936,6 +1572,7 @@ export default function App() {
                   {visibleCols.includes('version') && <th>内核版本</th>}
                   {visibleCols.includes('relay') && <th>中继节点</th>}
                   {visibleCols.includes('routes') && <th>子网路由</th>}
+                  <th>操作</th>
                 </tr></thead>
                 <tbody>
                   {visiblePeers.map((p, i) => {
@@ -954,8 +1591,7 @@ export default function App() {
                               onClick={() => {
                                 if (p.ipv4) {
                                   const clean = p.ipv4.split('/')[0].trim();
-                                  navigator.clipboard.writeText(clean);
-                                  addLog(`已复制对端 IP: ${clean}`);
+                                  void copyText(clean, `已复制对端 IP: ${clean}`);
                                 }
                               }}
                             >
@@ -966,7 +1602,53 @@ export default function App() {
                           </td>
                         )}
                         {visibleCols.includes('cidr') && <td>{p.cidr || '—'}</td>}
-{visibleCols.includes('hostname') && <td>{p.hostname || '—'}</td>}
+                        {visibleCols.includes('hostname') && (
+                          <td>
+                            {inlineRename?.peerId === (p.id ?? i) ? (
+                              <div className="inline-rename-cell">
+                                <input
+                                  className="field-input inline-edit-input"
+                                  autoFocus
+                                  disabled={inlineRename.saving}
+                                  value={inlineRename.currentName}
+                                  onChange={e => setInlineRename({ ...inlineRename, currentName: e.target.value })}
+                                  onKeyDown={e => {
+                                    if (e.key === 'Enter') {
+                                      e.preventDefault();
+                                      void submitRename();
+                                    } else if (e.key === 'Escape') {
+                                      setInlineRename(null);
+                                    }
+                                  }}
+                                  onBlur={() => {
+                                    if (!inlineRename.saving) setInlineRename(null);
+                                  }}
+                                />
+                                {inlineRename.saving && <span className="inline-spin">…</span>}
+                              </div>
+                            ) : (
+                              <span
+                                className={!isLocal && remoteIp ? 'peer-hostname-cell' : undefined}
+                                title={!isLocal && remoteIp ? '双击远程改名 (Enter 确认, Esc 取消)' : undefined}
+                                onDoubleClick={() => {
+                                  if (!isLocal && remoteIp) {
+                                    const cleanIp = remoteIp.split('/')[0].trim();
+                                    setInlineRename({
+                                      peerId: p.id ?? i,
+                                      originalName: p.hostname || '',
+                                      currentName: p.hostname || '',
+                                      host: cleanIp,
+                                      saving: false,
+                                    });
+                                  }
+                                }}
+                              >
+                                {p.hostname || '—'}
+                                {!isLocal && remoteIp && <IconPencil size={11} className="rename-hint-icon" />}
+                              </span>
+                            )}
+                          </td>
+                        )}
                         {visibleCols.includes('cost') && <td><span className={`route-badge tone-${routeTone(p.cost)}`}>{p.cost || '—'}</span></td>}
                         {visibleCols.includes('proto') && <td>{p.tunnel_proto || '—'}</td>}
                         {visibleCols.includes('latency') && <td className={`tone-${latencyTone(p.lat_ms)}`}>{p.lat_ms || '—'}</td>}
@@ -977,10 +1659,30 @@ export default function App() {
                         {visibleCols.includes('version') && <td>{p.version || '—'}</td>}
                         {visibleCols.includes('relay') && <td><span className={`route-badge tone-${routeTone(route && (route.path_len ?? 0) > 1 ? `Relay (${route.path_len})` : 'Local')}`}>{route && (route.path_len ?? 0) > 1 ? route.next_hop_hostname : '—'}</span></td>}
                         {visibleCols.includes('routes') && <td>{route?.proxy_cidrs && route.proxy_cidrs !== '' ? String(route.proxy_cidrs) : '—'}</td>}
+                        <td>
+                          {!isLocal && remoteIp ? (
+                            <button
+                              type="button"
+                              className="mini-button ghost"
+                              style={{ padding: '2px 8px', fontSize: 11 }}
+                              onClick={() => {
+                                const cleanIp = remoteIp.split('/')[0].trim();
+                                const candidatePorts = getCandidatePortsForIp(cleanIp, instances, current.rpcPort);
+                                const initialPort = candidatePorts[0] || 15888;
+                                setRemoteConfigTarget({ host: cleanIp, port: initialPort, candidatePorts });
+                              }}
+                              title="远程配置该设备的主机名/虚拟IP/代理网段/出口"
+                            >
+                              远程配置
+                            </button>
+                          ) : (
+                            <span style={{ opacity: 0.35, fontSize: 11 }}>—</span>
+                          )}
+                        </td>
                       </tr>
                     );
                   })}
-                  {visiblePeers.length === 0 && <tr><td colSpan={14} className="list-empty">暂无可显示成员</td></tr>}
+                  {visiblePeers.length === 0 && <tr><td colSpan={15} className="list-empty">暂无可显示成员</td></tr>}
                 </tbody>
               </table>
               </div>
@@ -1089,24 +1791,88 @@ export default function App() {
             </div>
             <div className="card">
               <div className="card-title-row">
-                <h3 className="card-title">EasyTier 内核更新</h3>
-                <span className="hint-inline">当前 v{kernelInfo?.current_version || runtime?.version || '未检测'}</span>
+                <h3 className="card-title">EasyTier 内核版本管理与切换</h3>
+                <span className="hint-inline">当前版本: {kernelInfo?.current_version || runtime?.version || '未检测'}</span>
               </div>
               <div className="kernel-update-controls">
                 <label className="field"><span className="field-label">GitHub 下载线路</span>
-                  <select className="field-input" value={kernelProxy} onChange={e => setKernelProxy(e.target.value)} disabled={!!kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)}>
+                  <select className="field-input" value={kernelProxy} onChange={e => setKernelProxy(e.target.value)} disabled={!!kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase)}>
                     {KERNEL_PROXIES.map(p => <option value={p.value} key={p.value}>{p.label}</option>)}
                   </select>
                 </label>
+                {kernelProxy === 'custom' && (
+                  <label className="field" style={{ minWidth: 260 }}>
+                    <span className="field-label">自定义镜像前缀 (如 https://ghproxy.net)</span>
+                    <input
+                      className="field-input"
+                      placeholder="https://your-mirror.example.com"
+                      value={customKernelProxy}
+                      onChange={e => setCustomKernelProxy(e.target.value)}
+                      disabled={!!kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase)}
+                    />
+                  </label>
+                )}
+                <label className="field"><span className="field-label">目标核心版本</span>
+                  <select
+                    className="field-input"
+                    value={selectedKernelVersion}
+                    onChange={e => setSelectedKernelVersion(e.target.value)}
+                    disabled={!!kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase)}
+                  >
+                    {availableKernelVersions.length === 0 ? (
+                      <option value="">{kernelInfo?.latest_version ? `v${kernelInfo.latest_version} (最新稳定版)` : '点击「获取版本列表」'}</option>
+                    ) : (
+                      availableKernelVersions.map(ver => (
+                        <option value={ver} key={ver}>
+                          {ver}{ver === `v${kernelInfo?.latest_version}` || ver === kernelInfo?.latest_version ? ' (最新稳定版)' : ''}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
                 <div className="kernel-update-actions">
-                  <button className="ghost" onClick={() => void checkKernelUpdate()} disabled={!!kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)}>检查更新</button>
-                  {kernelInfo?.update_available && <button className="primary" onClick={() => void updateKernel()} disabled={!!kernelUpdate && !['completed', 'failed'].includes(kernelUpdate.phase)}>更新到 v{kernelInfo.latest_version}</button>}
+                  <button className="ghost" onClick={() => void checkKernelUpdate()} disabled={!!kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase)}>
+                    {availableKernelVersions.length > 0 ? '刷新版本列表' : '获取版本列表'}
+                  </button>
+                  <button
+                    className="primary"
+                    onClick={() => void switchKernel(selectedKernelVersion)}
+                    disabled={
+                      (!!kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase)) ||
+                      (!selectedKernelVersion && !kernelInfo?.update_available)
+                    }
+                  >
+                    {selectedKernelVersion ? `切换/安装 ${selectedKernelVersion}` : kernelInfo?.update_available ? `更新到 v${kernelInfo.latest_version}` : '重新安装当前版本'}
+                  </button>
                 </div>
               </div>
+              {kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase) && (
+                <div className="kernel-card-progress">
+                  <div className="kernel-progress-head">
+                    <strong>更新进度</strong>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span>{KERNEL_PHASE_TEXT[kernelUpdate.phase] || kernelUpdate.phase}</span>
+                      <button
+                        type="button"
+                        className="mini-button danger"
+                        style={{ padding: '2px 8px', fontSize: 11 }}
+                        onClick={() => void cancelKernelUpdate()}
+                      >
+                        取消更新
+                      </button>
+                    </div>
+                  </div>
+                  <div className="kernel-progress-track">
+                    <div className="kernel-progress-bar" style={{ width: `${kernelUpdate.percent ?? 0}%` }} />
+                  </div>
+                  <small className="kernel-progress-msg">{kernelUpdate.message}{kernelUpdate.percent != null ? ` · ${kernelUpdate.percent}%` : ''}</small>
+                </div>
+              )}
               {kernelInfo?.error && <p className="list-empty err">检查失败：{kernelInfo.error}</p>}
-              {kernelInfo && !kernelInfo.error && !kernelInfo.update_available && <p className="hint">当前已是最新正式版本。</p>}
-              {kernelUpdate?.phase === 'failed' && <p className="list-empty err">更新失败：{kernelUpdate.error || kernelUpdate.message}</p>}
-              {kernelUpdate?.phase === 'completed' && <p className="hint">内核更新完成，原来运行中的网络已尝试自动恢复。</p>}
+              {kernelInfo && !kernelInfo.error && !kernelInfo.update_available && !selectedKernelVersion && <p className="hint">当前已是最新正式版本。可通过上方下拉选择历史版本进行自由切换。</p>}
+              {kernelUpdate?.phase === 'failed' && <p className="list-empty err">操作失败：{kernelUpdate.error || kernelUpdate.message}</p>}
+              {kernelUpdate?.phase === 'cancelled' && <p className="hint">已取消内核更新操作。</p>}
+              {kernelUpdate?.phase === 'completed' && <p className="hint">内核切换/更新完成，原来运行中的网络已尝试自动恢复。</p>}
             </div>
             <div className="card">
               <p className="hint">每个实例使用独立 RPC 端口，避免多实例冲突。启动网络后可通过 easytier-cli 连接该端口查询状态。</p>
@@ -1156,6 +1922,73 @@ export default function App() {
         )}
       </section>
     </main>
+      {remoteConfigTarget && (
+        <RemoteConfigDialog
+          host={remoteConfigTarget.host}
+          port={remoteConfigTarget.port}
+          candidatePorts={remoteConfigTarget.candidatePorts}
+          onSaved={(patched, effectivePort) => {
+            saveNodeRpcPort(remoteConfigTarget.host, effectivePort);
+            // Synchronize back to local instance config if target is a local instance!
+            setInstances(prev => {
+              const next = prev.map(inst => {
+                const cleanVirtual = inst.config.virtual_ipv4 ? inst.config.virtual_ipv4.split('/')[0].trim() : '';
+                const isMatch = inst.rpcPort === effectivePort
+                  || cleanVirtual === remoteConfigTarget.host
+                  || (inst.id === current.id && !remoteConfigTarget.host);
+                if (isMatch) {
+                  const updated = {
+                    ...inst,
+                    config: {
+                      ...inst.config,
+                      hostname: patched.hostname || inst.config.hostname,
+                      virtual_ipv4: patched.ipv4Addr ? `${patched.ipv4Addr}/${patched.ipv4Len}` : inst.config.virtual_ipv4,
+                      proxy_cidrs: patched.proxyCidrs.filter(Boolean),
+                    },
+                  };
+                  if (serviceMode) {
+                    void serviceRequest('sync_instance', {
+                      instance_id: updated.id,
+                      name: updated.name,
+                      config_toml: encodeTOML(updated.config),
+                      rpc_port: updated.rpcPort,
+                      auto_start: updated.autoStart ?? false,
+                      desired_state: updated.status === 'running' ? 'running' : 'stopped',
+                      remote_manage_enabled: updated.remoteManageEnabled ?? false,
+                      rpc_whitelist_cidrs: updated.rpcWhitelistCidrs ?? [],
+                    }).catch(() => {});
+                  }
+                  return updated;
+                }
+                return inst;
+              });
+              localStorage.setItem('easytier.instances.v2', JSON.stringify(next));
+              return next;
+            });
+            // Optimistically update current peers/routes in memory
+            setStatusByInstance(prev => {
+              const cur = prev[current.id];
+              if (!cur) return prev;
+              return {
+                ...prev,
+                [current.id]: {
+                  ...cur,
+                  peers: cur.peers.map(p => {
+                    const pIp = p.ipv4 ? p.ipv4.split('/')[0].trim() : '';
+                    return pIp === remoteConfigTarget.host ? { ...p, hostname: patched.hostname, ipv4: patched.ipv4Addr } : p;
+                  }),
+                  routes: cur.routes.map(r => {
+                    const rIp = r.ipv4 ? r.ipv4.split('/')[0].trim() : '';
+                    return rIp === remoteConfigTarget.host ? { ...r, hostname: patched.hostname, ipv4: patched.ipv4Addr, proxy_cidrs: patched.proxyCidrs.join(', ') } : r;
+                  }),
+                },
+              };
+            });
+            showToast(`✓ 配置已在远端生效，并已同步到本地记录 (RPC :${effectivePort})`);
+          }}
+          onClose={() => setRemoteConfigTarget(null)}
+        />
+      )}
     </>
   );
 }

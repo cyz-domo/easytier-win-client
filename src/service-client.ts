@@ -9,6 +9,7 @@ export type ServiceCommand =
   | 'stop_instance'
   | 'set_auto_start'
   | 'update_kernel'
+  | 'cancel_kernel_update'
   | 'run_cli'
   | 'get_task_status'
   | 'install_service'

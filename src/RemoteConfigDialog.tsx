@@ -11,6 +11,9 @@ interface RemoteConfigEditorProps {
   host: string;
   /** Target instance's RPC portal port (multi-instance hosts use several). */
   port: number;
+  candidatePorts?: number[];
+  onPortChange?: (port: number) => void;
+  onSaved?: (patched: { hostname: string; ipv4Addr: string; ipv4Len: number; proxyCidrs: string[]; exitNodes: string[] }, port: number) => void;
   /** Unique per mount: state resets when the key changes. */
   onClose?: () => void;
 }
@@ -35,6 +38,27 @@ function normalizeIp(ip: string): string {
   return ip.split('/')[0].trim();
 }
 
+function parseIpv4Cidr(cidrStr: string) {
+  const [ip, lenStr] = cidrStr.trim().split('/');
+  const parts = ip.split('.').map(n => parseInt(n, 10) | 0);
+  if (parts.length !== 4 || parts.some(n => Number.isNaN(n) || n < 0 || n > 255)) return null;
+  const len = parseInt(lenStr ?? '24', 10) || 24;
+  return {
+    address: { addr: ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0 },
+    network_length: len,
+  };
+}
+
+function parseExitNode(ipStr: string) {
+  const parts = ipStr.trim().split('.').map(n => parseInt(n, 10) | 0);
+  if (parts.length !== 4 || parts.some(n => Number.isNaN(n) || n < 0 || n > 255)) return null;
+  return {
+    addr: {
+      Ipv4: ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0,
+    },
+  };
+}
+
 /** Map get_config response fields to the editable subset. */
 function toEditState(config: Record<string, unknown>): EditState {
   const ipv4 = typeof config.virtual_ipv4 === 'string' ? config.virtual_ipv4 : '';
@@ -53,7 +77,7 @@ function toEditState(config: Record<string, unknown>): EditState {
  * config, tracks unsaved edits, and patches only the fields the remote
  * patch_config protocol supports.
  */
-export function RemoteConfigEditor({ host, port, onClose }: RemoteConfigEditorProps) {
+export function RemoteConfigEditor({ host, port, candidatePorts, onPortChange, onSaved, onClose }: RemoteConfigEditorProps) {
   const [phase, setPhase] = useState<Phase>('discover');
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<RemoteInstanceInfo | null>(null);
@@ -64,11 +88,41 @@ export function RemoteConfigEditor({ host, port, onClose }: RemoteConfigEditorPr
   const discoverAndLoad = useCallback(async () => {
     setError(null);
     setPhase('discover');
+    const portsToTry = candidatePorts && candidatePorts.length > 0
+      ? Array.from(new Set([port, ...candidatePorts]))
+      : [port];
+
+    let foundInfo: RemoteInstanceInfo | null = null;
+    let effectivePort = port;
+    let lastErr: unknown = null;
+
+    const probe = async (p: number) => {
+      const disc = await invoke<RemoteInstanceInfo>('remote_config_discover', { host, port: p, virtualIp: host });
+      return { disc, port: p };
+    };
+
     try {
-      const disc = await invoke<RemoteInstanceInfo>('remote_config_discover', { host, port, virtualIp: host });
-      setInfo(disc);
-      setPhase('load');
-      const cfg = await invoke<Record<string, unknown>>('remote_config_load', { host, port, instanceId: disc.instance_id });
+      const winner = await Promise.any(portsToTry.map(p => probe(p)));
+      foundInfo = winner.disc;
+      effectivePort = winner.port;
+    } catch (e) {
+      lastErr = e;
+    }
+
+    if (!foundInfo) {
+      setError(String(lastErr || '未能通过已知 RPC 端口连接到目标设备'));
+      setPhase('discover');
+      return;
+    }
+
+    if (effectivePort !== port && onPortChange) {
+      onPortChange(effectivePort);
+    }
+
+    setInfo(foundInfo);
+    setPhase('load');
+    try {
+      const cfg = await invoke<Record<string, unknown>>('remote_config_load', { host, port: effectivePort, instanceId: foundInfo.instance_id });
       const config = (cfg.config ?? cfg) as Record<string, unknown>;
       const state = toEditState(config);
       setEdit(state);
@@ -76,9 +130,9 @@ export function RemoteConfigEditor({ host, port, onClose }: RemoteConfigEditorPr
       setPhase('ready');
     } catch (e) {
       setError(String(e));
-      setPhase(p => (p === 'discover' ? 'discover' : 'load'));
+      setPhase('load');
     }
-  }, [host, port]);
+  }, [host, port, candidatePorts, onPortChange]);
 
   useEffect(() => { void discoverAndLoad(); }, [discoverAndLoad, reloadKey]);
 
@@ -101,11 +155,24 @@ export function RemoteConfigEditor({ host, port, onClose }: RemoteConfigEditorPr
           network_length: edit.ipv4Len,
         };
       }
-      if (JSON.stringify(edit.proxyCidrs) !== JSON.stringify(snapshot?.proxyCidrs)) patch.proxy_networks = edit.proxyCidrs;
-      if (JSON.stringify(edit.exitNodes) !== JSON.stringify(snapshot?.exitNodes)) patch.exit_nodes = edit.exitNodes;
+      if (JSON.stringify(edit.proxyCidrs) !== JSON.stringify(snapshot?.proxyCidrs)) {
+        const validProxies = edit.proxyCidrs.map(parseIpv4Cidr).filter(Boolean);
+        patch.proxy_networks = [
+          { action: 2 }, // Clear
+          ...validProxies.map(c => ({ action: 0, cidr: c })),
+        ];
+      }
+      if (JSON.stringify(edit.exitNodes) !== JSON.stringify(snapshot?.exitNodes)) {
+        const validNodes = edit.exitNodes.map(parseExitNode).filter(Boolean);
+        patch.exit_nodes = [
+          { action: 2 }, // Clear
+          ...validNodes.map(n => ({ action: 0, node: n })),
+        ];
+      }
       if (Object.keys(patch).length === 0) { setPhase('ready'); return; }
       await invoke('remote_config_patch', { host, port, instanceId: info.instance_id, patch });
       setSnapshot(edit);
+      onSaved?.(edit, port);
       setPhase('saved');
       setTimeout(() => setPhase(p => (p === 'saved' ? 'ready' : p)), 1600);
     } catch (e) {
@@ -197,19 +264,42 @@ export function RemoteConfigEditor({ host, port, onClose }: RemoteConfigEditorPr
 interface RemoteConfigDialogProps {
   host: string;
   port: number;
+  candidatePorts?: number[];
+  onSaved?: (patched: { hostname: string; ipv4Addr: string; ipv4Len: number; proxyCidrs: string[]; exitNodes: string[] }, port: number) => void;
   onClose: () => void;
 }
 
 /** Overlay wrapper around RemoteConfigEditor. */
-export function RemoteConfigDialog({ host, port, onClose }: RemoteConfigDialogProps) {
+export function RemoteConfigDialog({ host, port: initialPort, candidatePorts, onSaved, onClose }: RemoteConfigDialogProps) {
+  const [port, setPort] = useState(initialPort);
   return (
     <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="远程配置">
       <div className="modal-card">
         <div className="card-title-row">
           <h3 className="card-title">远程配置 — {host}</h3>
-          <button type="button" className="ghost" onClick={onClose}>关闭</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <label style={{ fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+              <span>RPC 端口:</span>
+              <input
+                type="number"
+                className="field-input narrow"
+                style={{ width: 75, padding: '4px 6px' }}
+                value={port}
+                onChange={e => setPort(parseInt(e.target.value, 10) || 15888)}
+              />
+            </label>
+            <button type="button" className="ghost" onClick={onClose}>关闭</button>
+          </div>
         </div>
-        <RemoteConfigEditor host={host} port={port} onClose={onClose} />
+        <RemoteConfigEditor
+          key={`${host}:${port}`}
+          host={host}
+          port={port}
+          candidatePorts={candidatePorts}
+          onPortChange={setPort}
+          onSaved={onSaved}
+          onClose={onClose}
+        />
       </div>
     </div>
   );

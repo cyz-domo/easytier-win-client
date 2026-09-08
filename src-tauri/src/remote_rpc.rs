@@ -699,12 +699,23 @@ fn validate_patch(patch: &Value) -> Result<(), RpcError> {
 /// Apply a config patch to the remote instance (`patch_config`).
 pub async fn patch_remote_config(host: &str, port: u16, instance_id: &str, patch: Value) -> Result<Value, String> {
     let endpoint = endpoint_for(host, port).map_err(|e| e.to_string())?;
-    let patch_value = patch;
+    let mut patch_value = patch;
     validate_patch(&patch_value).map_err(|e| e.to_string())?;
     let ident = instance_identifier(instance_id).map_err(|e| e.to_string())?;
     // The frontend sends a JSON object keyed by InstanceConfigPatch field
-    // names; convert it via the type's serde impl so unknown/typo'd keys fail
-    // here instead of silently reaching the remote node.
+    // names; ensure repeated fields default to [] so serde does not reject missing fields.
+    if let Some(obj) = patch_value.as_object_mut() {
+        for key in [
+            "port_forwards",
+            "proxy_networks",
+            "routes",
+            "exit_nodes",
+            "mapped_listeners",
+            "connectors",
+        ] {
+            obj.entry(key).or_insert_with(|| serde_json::json!([]));
+        }
+    }
     let patch_typed: easytier::proto::api::config::InstanceConfigPatch =
         serde_json::from_value(patch_value).map_err(|e| format!("invalid patch payload: {e}"))?;
     let result = call_with_endpoint(&endpoint, &format!("rpc-{host}-{port}"), "patch_config", |client| {
@@ -802,6 +813,26 @@ mod tests {
         assert!(instance_identifier("f7c2f0e4-9c1d-4a8b-b3f0-6f5d9a1b2c3d").is_ok());
     }
 
-
-
+    #[test]
+    fn test_patch_payload_deserialization() {
+        let mut patch_value = serde_json::json!({
+            "hostname": "test2"
+        });
+        if let Some(obj) = patch_value.as_object_mut() {
+            for key in [
+                "port_forwards",
+                "proxy_networks",
+                "routes",
+                "exit_nodes",
+                "mapped_listeners",
+                "connectors",
+            ] {
+                obj.entry(key).or_insert_with(|| serde_json::json!([]));
+            }
+        }
+        let res: Result<easytier::proto::api::config::InstanceConfigPatch, _> = serde_json::from_value(patch_value);
+        assert!(res.is_ok(), "Failed to deserialize: {:?}", res.err());
+        let patch = res.unwrap();
+        assert_eq!(patch.hostname, Some("test2".to_string()));
+    }
 }

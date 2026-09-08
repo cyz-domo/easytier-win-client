@@ -92,7 +92,12 @@ function flagsOf(c: NetworkConfig): FlagsTOML {
   if (c.enable_relay_network_whitelist === true && c.relay_network_whitelist.length > 0) {
     f.relay_network_whitelist = c.relay_network_whitelist.join(' ');
   }
-  if (c.dev_name.trim()) f.dev_name = c.dev_name;
+  if (c.dev_name && c.dev_name.trim()) {
+    f.dev_name = c.dev_name.trim();
+  } else {
+    const safeId = (c.instance_id || 'default').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6);
+    f.dev_name = `et_${safeId}`;
+  }
   if (c.instance_recv_bps_limit != null) f.instance_recv_bps_limit = c.instance_recv_bps_limit;
   return f;
 }
