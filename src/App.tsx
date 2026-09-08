@@ -836,7 +836,24 @@ export default function App() {
                   <p className="warn-inline">⚠ 本机尚未获得虚拟 IPv4 —— 请在「组网配置 → 基础配置」勾选 DHCP 或手动填写虚拟 IPv4，然后重启网络（TUN 需要管理员权限运行客户端）。</p>
                 )}
               </div>
-              <div className="status-meta"><span>本机虚拟地址</span><b>{node?.ipv4_addr || (current.config.dhcp ? '等待分配' : current.config.virtual_ipv4 || '—')}</b></div>
+              <div className="status-meta">
+                <span>本机虚拟地址</span>
+                <b
+                  style={{ cursor: (node?.ipv4_addr || current.config.virtual_ipv4) ? 'pointer' : 'default', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                  title="点击复制虚拟 IP"
+                  onClick={() => {
+                    const ip = node?.ipv4_addr || current.config.virtual_ipv4;
+                    if (ip) {
+                      const clean = ip.split('/')[0].trim();
+                      navigator.clipboard.writeText(clean);
+                      addLog(`已复制本机虚拟 IP: ${clean}`);
+                    }
+                  }}
+                >
+                  {node?.ipv4_addr || (current.config.dhcp ? '等待分配' : current.config.virtual_ipv4 || '—')}
+                  {(node?.ipv4_addr || current.config.virtual_ipv4) && <IconCopy size={13} style={{ opacity: 0.55 }} />}
+                </b>
+              </div>
             </div>
             <div className="metrics">
               <article><span>组网成员</span><strong>{running ? peers.length : '—'}</strong><small>{running ? '在线节点' : '未运行'}</small></article>
@@ -926,7 +943,25 @@ export default function App() {
                     return (
                       <tr key={String(p.id ?? i)}>
                         {visibleCols.includes('nodeid') && <td>{String(p.id ?? '—')}<div className="cell-sub">{nodeType}</div></td>}
-                        {visibleCols.includes('ipv4') && <td>{p.ipv4 || '—'}{!isLocal && remoteIp && <div className="cell-sub">{nodeType}</div>}</td>}
+                        {visibleCols.includes('ipv4') && (
+                          <td>
+                            <span
+                              style={{ cursor: p.ipv4 ? 'pointer' : 'default', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                              title={p.ipv4 ? '点击复制 IP' : undefined}
+                              onClick={() => {
+                                if (p.ipv4) {
+                                  const clean = p.ipv4.split('/')[0].trim();
+                                  navigator.clipboard.writeText(clean);
+                                  addLog(`已复制对端 IP: ${clean}`);
+                                }
+                              }}
+                            >
+                              {p.ipv4 || '—'}
+                              {p.ipv4 && <IconCopy size={11} style={{ opacity: 0.5 }} />}
+                            </span>
+                            {!isLocal && remoteIp && <div className="cell-sub">{nodeType}</div>}
+                          </td>
+                        )}
                         {visibleCols.includes('cidr') && <td>{p.cidr || '—'}</td>}
 {visibleCols.includes('hostname') && <td>{p.hostname || '—'}</td>}
                         {visibleCols.includes('cost') && <td><span className={`route-badge tone-${routeTone(p.cost)}`}>{p.cost || '—'}</span></td>}
