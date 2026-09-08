@@ -21,15 +21,30 @@
   FileClose $1
   nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\stop-service.ps1"'
   Pop $0
-  ; Do not rely on ExecutablePath here: CIM may return it empty for a
-  ; non-elevated portable process. The installer is upgrading EasyTier, so all
-  ; EasyTier core processes must be gone before replacing the WinDivert driver.
+  ; Terminate processes, stop WinDivert kernel driver service, and rename any locked
+  ; driver/DLL files so installer file replacement succeeds without reboot.
   FileOpen $1 "$PLUGINSDIR\stop-cores.ps1" w
-  FileWrite $1 "Get-Process -Name 'easytier-core' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue$\r$\n"
-  FileWrite $1 "for ($$i=0; $$i -lt 40; $$i++) { $$locked = $$false; try { $$f = [IO.File]::Open((Join-Path '$INSTDIR' 'core\WinDivert64.sys'), 'Open', 'ReadWrite', 'None'); $$f.Close() } catch { $$locked = $$true }; if (-not $$locked) { exit 0 }; Start-Sleep -Milliseconds 500 }$\r$\n"
+  FileWrite $1 "@('easytier-core', 'easytier-cli', 'easytier-win-client') | ForEach-Object { Get-Process -Name $$_ -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue }$\r$\n"
+  FileWrite $1 "@('WinDivert', 'WinDivert14') | ForEach-Object { & sc.exe stop $$_ 2>$$null; & sc.exe delete $$_ 2>$$null }$\r$\n"
+  FileWrite $1 "$$dirs = @((Join-Path '$INSTDIR' 'core'), '$INSTDIR')$\r$\n"
+  FileWrite $1 "foreach ($$dir in $$dirs) {$\r$\n"
+  FileWrite $1 "  if (Test-Path $$dir) {$\r$\n"
+  FileWrite $1 "    Get-ChildItem -Path $$dir -File -ErrorAction SilentlyContinue | Where-Object { $$_.Extension -in '.sys', '.dll', '.exe' } | ForEach-Object {$\r$\n"
+  FileWrite $1 "      $$p = $$_.FullName; $$locked = $$false$\r$\n"
+  FileWrite $1 "      try { $$f = [System.IO.File]::Open($$p, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); $$f.Close() } catch { $$locked = $$true }$\r$\n"
+  FileWrite $1 "      if ($$locked) {$\r$\n"
+  FileWrite $1 "        $$old = $$p + '.' + [System.Guid]::NewGuid().ToString('N').Substring(0,8) + '.old'$\r$\n"
+  FileWrite $1 "        try { [System.IO.File]::Move($$p, $$old) } catch { try { Move-Item -LiteralPath $$p -Destination $$old -Force -ErrorAction SilentlyContinue } catch {} }$\r$\n"
+  FileWrite $1 "      }$\r$\n"
+  FileWrite $1 "    }$\r$\n"
+  FileWrite $1 "    Get-ChildItem -Path $$dir -Filter '*.old' -ErrorAction SilentlyContinue | ForEach-Object { try { Remove-Item -LiteralPath $$_.FullName -Force -ErrorAction SilentlyContinue } catch {} }$\r$\n"
+  FileWrite $1 "  }$\r$\n"
+  FileWrite $1 "}$\r$\n"
   FileClose $1
   nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\stop-cores.ps1"'
   Pop $0
+  Delete /REBOOTOK "$INSTDIR\core\*.old"
+  Delete /REBOOTOK "$INSTDIR\*.old"
   ; Retry delete and confirm the SCM entry is gone before continuing.
   StrCpy $1 0
   service_delete_loop:

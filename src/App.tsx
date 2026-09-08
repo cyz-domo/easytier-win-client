@@ -797,7 +797,10 @@ export default function App() {
         <button className="add-button" onClick={addInstance}><IconPlus size={14} /> 新建实例</button>
         <div className="sidebar-bottom">
           <button className="quiet" onClick={() => setTab('settings')}><IconGear size={14} /> 设置</button>
-          <span className="version">{runtime?.version ? `核心 ${runtime.version.split(' ').pop()}` : '核心未检测'} · 客户端 0.1.0</span>
+          <div className="version-block">
+            <span className="version-row">核心版本：{runtime?.version ? runtime.version.split(' ').pop() : '未检测'}</span>
+            <span className="version-row">客户端版本：v0.1.0</span>
+          </div>
         </div>
       </aside>
 
