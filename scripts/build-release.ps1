@@ -42,6 +42,24 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
   }
 }
 
+# Auto-detect local thunk-rs and protoc caches if not already set.
+if (-not $env:VC_LTL -and (Test-Path "$RepoRoot\.build-cache\vc-ltl")) {
+  $env:VC_LTL = "$RepoRoot\.build-cache\vc-ltl"
+  Write-Host "Using VC-LTL cache: $env:VC_LTL" -ForegroundColor DarkGray
+}
+if (-not $env:YY_THUNKS -and (Test-Path "$RepoRoot\.build-cache\yy-thunks")) {
+  $env:YY_THUNKS = "$RepoRoot\.build-cache\yy-thunks"
+  Write-Host "Using YY-Thunks cache: $env:YY_THUNKS" -ForegroundColor DarkGray
+}
+if (-not $env:PROTOC) {
+  $protocCandidate = 'E:\app\agent-worker\cargo\registry\src\rsproxy.cn-e3de039b2554c837\protoc-bin-vendored-win32-3.2.0\bin\protoc.exe'
+  if (Test-Path $protocCandidate) {
+    $env:PROTOC = $protocCandidate
+    Write-Host "Using PROTOC: $env:PROTOC" -ForegroundColor DarkGray
+  }
+}
+$env:CARGO_NET_GIT_FETCH_WITH_CLI = 'true'
+
 $failures = @()
 $warnings = @()
 
