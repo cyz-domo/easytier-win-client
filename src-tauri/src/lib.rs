@@ -1356,6 +1356,7 @@ pub struct PublicNodeInfo {
     pub category: String, // "domestic" | "overseas"
     pub is_online: bool,
     pub ping_ms: Option<i64>,
+    pub local_ping_ms: Option<i64>,
     pub uptime_pct: Option<f64>,
     pub can_relay: bool,
     pub is_masked: bool,
@@ -1381,6 +1382,7 @@ fn default_fallback_nodes() -> Vec<PublicNodeInfo> {
             category: "domestic".into(),
             is_online: true,
             ping_ms: Some(35),
+            local_ping_ms: None,
             uptime_pct: Some(99.9),
             can_relay: true,
             is_masked: false,
@@ -1393,6 +1395,7 @@ fn default_fallback_nodes() -> Vec<PublicNodeInfo> {
             category: "domestic".into(),
             is_online: true,
             ping_ms: Some(38),
+            local_ping_ms: None,
             uptime_pct: Some(100.0),
             can_relay: true,
             is_masked: false,
@@ -1405,6 +1408,7 @@ fn default_fallback_nodes() -> Vec<PublicNodeInfo> {
             category: "domestic".into(),
             is_online: true,
             ping_ms: Some(42),
+            local_ping_ms: None,
             uptime_pct: Some(100.0),
             can_relay: true,
             is_masked: false,
@@ -1417,6 +1421,7 @@ fn default_fallback_nodes() -> Vec<PublicNodeInfo> {
             category: "domestic".into(),
             is_online: true,
             ping_ms: Some(30),
+            local_ping_ms: None,
             uptime_pct: Some(99.8),
             can_relay: true,
             is_masked: false,
@@ -1429,6 +1434,7 @@ fn default_fallback_nodes() -> Vec<PublicNodeInfo> {
             category: "domestic".into(),
             is_online: true,
             ping_ms: Some(41),
+            local_ping_ms: None,
             uptime_pct: Some(100.0),
             can_relay: true,
             is_masked: false,
@@ -1441,6 +1447,7 @@ fn default_fallback_nodes() -> Vec<PublicNodeInfo> {
             category: "overseas".into(),
             is_online: true,
             ping_ms: Some(165),
+            local_ping_ms: None,
             uptime_pct: Some(100.0),
             can_relay: true,
             is_masked: false,
@@ -1453,6 +1460,7 @@ fn default_fallback_nodes() -> Vec<PublicNodeInfo> {
             category: "overseas".into(),
             is_online: true,
             ping_ms: Some(180),
+            local_ping_ms: None,
             uptime_pct: Some(100.0),
             can_relay: true,
             is_masked: false,
@@ -1461,45 +1469,174 @@ fn default_fallback_nodes() -> Vec<PublicNodeInfo> {
     ]
 }
 
-/// Robustly extracts node address from raw monitor names.
-/// Correctly handles IPv4, domain names, AND bracketed IPv6 hosts (e.g. tcp://[2400:...]:11010).
+/// Robustly extracts node address from raw monitor names without byte slice panic on UTF-8 boundaries.
+/// Safely handles IPv4, domain names, Chinese domains, and bracketed IPv6 hosts.
 fn extract_node_address(raw_name: &str) -> Option<String> {
-    let idx = raw_name.find("://")?;
-    let scheme_start = raw_name[..idx]
-        .rfind(|c: char| !c.is_alphanumeric() && c != '_')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let scheme = &raw_name[scheme_start..idx];
-    let rest = &raw_name[idx + 3..];
+    let (before_scheme, after_scheme) = raw_name.split_once("://")?;
 
-    let host_port = if rest.starts_with('[') {
-        // IPv6 bracketed host: [2400:...]:11010(...)
-        if let Some(bracket_end) = rest.find(']') {
-            let after = &rest[bracket_end + 1..];
-            let end_offset = after
-                .find(|c: char| c.is_whitespace() || c == '（' || c == '(' || c == '【' || c == '[' || c == '，' || c == ',')
-                .unwrap_or(after.len());
-            &rest[..bracket_end + 1 + end_offset]
+    let mut scheme_chars: Vec<char> = Vec::new();
+    for c in before_scheme.chars().rev() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            scheme_chars.push(c);
         } else {
-            let end_offset = rest
-                .find(|c: char| c.is_whitespace() || c == '（' || c == '(' || c == '【')
-                .unwrap_or(rest.len());
-            &rest[..end_offset]
+            break;
+        }
+    }
+    if scheme_chars.is_empty() {
+        return None;
+    }
+    scheme_chars.reverse();
+    let scheme: String = scheme_chars.into_iter().collect();
+
+    let mut host_port = String::new();
+    if after_scheme.starts_with('[') {
+        if let Some((v6, rest)) = after_scheme.split_once(']') {
+            host_port.push_str(v6);
+            host_port.push(']');
+            for c in rest.chars() {
+                if c == ':' || c.is_ascii_digit() {
+                    host_port.push(c);
+                } else {
+                    break;
+                }
+            }
         }
     } else {
-        // IPv4 or domain name: 225284.xyz:11010(...)
-        let end_offset = rest
-            .find(|c: char| c.is_whitespace() || c == '（' || c == '(' || c == '[' || c == '【' || c == '，' || c == ',')
-            .unwrap_or(rest.len());
-        &rest[..end_offset]
-    };
+        for c in after_scheme.chars() {
+            if c.is_whitespace()
+                || c == '（'
+                || c == '('
+                || c == '['
+                || c == '【'
+                || c == '，'
+                || c == ','
+                || c == ')'
+                || c == '）'
+                || c == ']'
+                || c == '】'
+            {
+                break;
+            }
+            host_port.push(c);
+        }
+    }
 
-    let cleaned = host_port.trim_end_matches(|c: char| c == '/' || c == ' ' || c == ')' || c == '）' || c == ']' || c == '】');
+    let cleaned = host_port.trim_end_matches('/');
     if cleaned.is_empty() {
         None
     } else {
         Some(format!("{}://{}", scheme, cleaned))
     }
+}
+
+fn parse_host_port(address: &str) -> Option<(String, u16)> {
+    let (scheme, after_scheme) = address.split_once("://")?;
+    let default_port = match scheme {
+        "https" | "wss" => 443,
+        "http" | "ws" => 80,
+        _ => 11010,
+    };
+
+    if after_scheme.starts_with('[') {
+        if let Some(bracket_end) = after_scheme.find(']') {
+            let host_part = &after_scheme[..=bracket_end];
+            let after_bracket = &after_scheme[bracket_end + 1..];
+            let port = if let Some(colon) = after_bracket.find(':') {
+                let p_str: String = after_bracket[colon + 1..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                p_str.parse::<u16>().unwrap_or(default_port)
+            } else {
+                default_port
+            };
+            return Some((host_part.to_string(), port));
+        }
+    }
+
+    let clean_after = after_scheme.trim_end_matches('/');
+    if let Some((host, port_part)) = clean_after.split_once(':') {
+        let p_str: String = port_part.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let port = p_str.parse::<u16>().unwrap_or(default_port);
+        Some((host.to_string(), port))
+    } else {
+        Some((clean_after.to_string(), default_port))
+    }
+}
+
+fn tcp_ping(host: &str, port: u16, timeout: std::time::Duration) -> Option<i64> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let addr_str = if host.starts_with('[') && host.ends_with(']') {
+        format!("{}:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    };
+
+    let addrs: Vec<_> = addr_str.to_socket_addrs().ok()?.collect();
+    if addrs.is_empty() {
+        return None;
+    }
+
+    let start = std::time::Instant::now();
+    for addr in addrs {
+        if let Ok(stream) = TcpStream::connect_timeout(&addr, timeout) {
+            drop(stream);
+            return Some(start.elapsed().as_millis() as i64);
+        }
+    }
+    None
+}
+
+fn batch_tcp_ping(nodes: &mut [PublicNodeInfo]) {
+    use std::thread;
+    let mut targets = Vec::new();
+    for (idx, node) in nodes.iter().enumerate() {
+        if !node.is_masked && node.is_online {
+            if let Some((host, port)) = parse_host_port(&node.address) {
+                targets.push((idx, host, port));
+            }
+        }
+    }
+
+    let mut handles = Vec::new();
+    for (idx, host, port) in targets {
+        handles.push(thread::spawn(move || {
+            let ping = tcp_ping(&host, port, std::time::Duration::from_millis(1500));
+            (idx, ping)
+        }));
+    }
+
+    for h in handles {
+        if let Ok((idx, ping)) = h.join() {
+            if let Some(node) = nodes.get_mut(idx) {
+                node.local_ping_ms = ping;
+            }
+        }
+    }
+}
+
+#[tauri::command]
+async fn ping_public_nodes(addresses: Vec<String>) -> Result<HashMap<String, Option<i64>>, String> {
+    tokio::task::spawn_blocking(move || {
+        use std::thread;
+        let mut handles = Vec::new();
+        for addr in addresses {
+            handles.push(thread::spawn(move || {
+                let ping = parse_host_port(&addr)
+                    .and_then(|(host, port)| tcp_ping(&host, port, std::time::Duration::from_millis(1500)));
+                (addr, ping)
+            }));
+        }
+        let mut results = HashMap::new();
+        for h in handles {
+            if let Ok((addr, ping)) = h.join() {
+                results.insert(addr, ping);
+            }
+        }
+        results
+    })
+    .await
+    .map_err(|e| format!("ping_public_nodes error: {e}"))
 }
 
 #[tauri::command]
@@ -1521,8 +1658,11 @@ async fn fetch_public_nodes(force_refresh: Option<bool>) -> Result<PublicNodesRe
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        let mut fallback_nodes = default_fallback_nodes();
+        batch_tcp_ping(&mut fallback_nodes);
+
         let fallback_resp = PublicNodesResponse {
-            nodes: default_fallback_nodes(),
+            nodes: fallback_nodes,
             is_fallback: true,
             updated_at: now_ts,
         };
@@ -1559,6 +1699,7 @@ async fn fetch_public_nodes(force_refresh: Option<bool>) -> Result<PublicNodesRe
             category: "domestic".into(),
             is_online: true,
             ping_ms: Some(35),
+            local_ping_ms: None,
             uptime_pct: Some(99.9),
             can_relay: true,
             is_masked: false,
@@ -1590,13 +1731,11 @@ async fn fetch_public_nodes(force_refresh: Option<bool>) -> Result<PublicNodesRe
                         let is_masked = address.contains('*');
                         let can_relay = !raw_name.contains("禁中转");
 
-                        // Extract clean description from parentheses
+                        // Extract clean description safely using split_once without byte slicing
                         let mut description = String::new();
-                        if let Some(start) = raw_name.find('（').or_else(|| raw_name.find('(')) {
-                            if let Some(end) = raw_name.rfind('）').or_else(|| raw_name.rfind(')')) {
-                                if end > start {
-                                    description = raw_name[start + 1..end].trim().to_string();
-                                }
+                        if let Some((_, after_open)) = raw_name.split_once('（').or_else(|| raw_name.split_once('(')) {
+                            if let Some((inner, _)) = after_open.rsplit_once('）').or_else(|| after_open.rsplit_once(')')) {
+                                description = inner.trim().to_string();
                             }
                         }
                         if description.is_empty() {
@@ -1633,6 +1772,7 @@ async fn fetch_public_nodes(force_refresh: Option<bool>) -> Result<PublicNodesRe
                             category: category.to_string(),
                             is_online,
                             ping_ms,
+                            local_ping_ms: None,
                             uptime_pct,
                             can_relay,
                             is_masked,
@@ -1643,7 +1783,10 @@ async fn fetch_public_nodes(force_refresh: Option<bool>) -> Result<PublicNodesRe
             }
         }
 
-        // Sort nodes: official node first, unmasked first, online first, then lowest ping
+        // Measure real local latency via concurrent TCP handshake
+        batch_tcp_ping(&mut nodes);
+
+        // Sort nodes: official node first, unmasked first, online first, then lowest local ping (or monitor ping)
         nodes.sort_by(|a, b| {
             if a.id == 0 {
                 return std::cmp::Ordering::Less;
@@ -1657,8 +1800,8 @@ async fn fetch_public_nodes(force_refresh: Option<bool>) -> Result<PublicNodesRe
             if a.is_online != b.is_online {
                 return b.is_online.cmp(&a.is_online);
             }
-            let ping_a = a.ping_ms.unwrap_or(9999);
-            let ping_b = b.ping_ms.unwrap_or(9999);
+            let ping_a = a.local_ping_ms.or(a.ping_ms).unwrap_or(9999);
+            let ping_b = b.local_ping_ms.or(b.ping_ms).unwrap_or(9999);
             ping_a.cmp(&ping_b)
         });
 
@@ -1847,6 +1990,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             trim_memory,
             fetch_public_nodes,
+            ping_public_nodes,
             query_service_installation,
             detect_runtime,
             get_instance_state,

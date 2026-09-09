@@ -2188,6 +2188,20 @@ button.stop {
   color: #dc2626;
 }
 
+.node-status-badge.masked {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--ink-3);
+}
+
+.probe-badge {
+  font-size: 10px;
+  font-weight: 550;
+  color: var(--ink-3);
+  background: rgba(148, 163, 184, 0.15);
+  padding: 1px 6px;
+  border-radius: var(--pill);
+}
+
 .status-dot-sm {
   width: 6px;
   height: 6px;
