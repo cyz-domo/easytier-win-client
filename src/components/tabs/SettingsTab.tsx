@@ -43,6 +43,11 @@ interface SettingsTabProps {
   setSecretVisible: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
+function normalizeVersion(v: string | null | undefined): string {
+  if (!v) return '';
+  return v.trim().replace(/^v/i, '').split('-')[0].split('+')[0].trim();
+}
+
 export const SettingsTab: React.FC<SettingsTabProps> = ({
   current,
   instances,
@@ -72,6 +77,16 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   secretVisible,
   setSecretVisible,
 }) => {
+  const isUpdatingKernel = !!kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase);
+  const currentVersionStr = kernelInfo?.current_version || runtime?.version || '';
+  const currentVerNormalized = normalizeVersion(currentVersionStr);
+  const targetVerNormalized = normalizeVersion(
+    selectedKernelVersion || (kernelInfo?.latest_version ? `v${kernelInfo.latest_version}` : '')
+  );
+  const isCurrentVersion = Boolean(
+    currentVerNormalized && targetVerNormalized && currentVerNormalized === targetVerNormalized
+  );
+
   return (
     <>
       <div className="card service-card">
@@ -243,7 +258,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <button
               className="ghost"
               onClick={() => void checkKernelUpdate()}
-              disabled={!!kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase)}
+              disabled={isUpdatingKernel}
             >
               {availableKernelVersions.length > 0 ? '刷新版本列表' : '获取版本列表'}
             </button>
@@ -251,15 +266,25 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               className="primary"
               onClick={() => void switchKernel(selectedKernelVersion)}
               disabled={
-                (!!kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase)) ||
+                isUpdatingKernel ||
+                isCurrentVersion ||
                 (!selectedKernelVersion && !kernelInfo?.update_available)
               }
+              title={
+                isCurrentVersion
+                  ? `当前已是版本 ${selectedKernelVersion || currentVersionStr}，无需切换`
+                  : selectedKernelVersion
+                  ? `点击切换/安装 ${selectedKernelVersion}`
+                  : ''
+              }
             >
-              {selectedKernelVersion
+              {isCurrentVersion
+                ? `当前已是该版本 (${selectedKernelVersion || currentVersionStr})`
+                : selectedKernelVersion
                 ? `切换/安装 ${selectedKernelVersion}`
                 : kernelInfo?.update_available
                 ? `更新到 v${kernelInfo.latest_version}`
-                : '重新安装当前版本'}
+                : '当前已是该版本'}
             </button>
           </div>
         </div>
@@ -289,8 +314,13 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           </div>
         )}
         {kernelInfo?.error && <p className="list-empty err">检查失败：{kernelInfo.error}</p>}
-        {kernelInfo && !kernelInfo.error && !kernelInfo.update_available && !selectedKernelVersion && (
-          <p className="hint">当前已是最新正式版本。可通过上方下拉选择历史版本进行自由切换。</p>
+        {isCurrentVersion && !kernelUpdate && (
+          <p className="hint" style={{ marginTop: 10 }}>
+            当前已安装此内核版本（{currentVersionStr}）。如需体验其他版本，可在上方下拉列表中选择历史版本进行自由切换。
+          </p>
+        )}
+        {kernelInfo && !kernelInfo.error && !kernelInfo.update_available && !selectedKernelVersion && !isCurrentVersion && (
+          <p className="hint" style={{ marginTop: 10 }}>当前已是最新正式版本。可通过上方下拉选择历史版本进行自由切换。</p>
         )}
         {kernelUpdate?.phase === 'failed' && (
           <p className="list-empty err">操作失败：{kernelUpdate.error || kernelUpdate.message}</p>

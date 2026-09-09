@@ -1371,6 +1371,29 @@ button.stop {
   color: #fbbf24;
 }
 
+/* Kernel Update Controls & Spacing */
+.kernel-update-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.kernel-update-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.kernel-update-actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
 /* Progress bar */
 .kernel-progress-track {
   height: 6px;
