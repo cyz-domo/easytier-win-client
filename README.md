@@ -1,7 +1,7 @@
 # EasyTier for Windows
 
 <div align="center">
-  <img src="app-icon.png" width="96" alt="EasyTier Windows Logo" />
+  <img src="app-icon.png" width="110" alt="EasyTier Logo" />
   <p><strong>简单、轻量、去中心化的全网状 Mesh 虚拟局域网客户端（Windows 版）</strong></p>
   <p>把散落在家里、办公室、云服务器上的 Windows PC 与设备拉进同一个虚拟局域网，互访就像插在同一台交换机上。</p>
   <p>
