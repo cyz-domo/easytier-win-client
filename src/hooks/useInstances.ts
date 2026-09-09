@@ -75,7 +75,13 @@ export function useInstances(
     (patch: Partial<NetworkConfig>) => {
       if (!current) return;
       const nextConfig = { ...current.config, ...patch };
-      const nextName = patch.network_name !== undefined ? patch.network_name || current.name : current.name;
+      // 仅当实例名与原网络名保持一致，或者仍为默认实例名时，修改网络名称才同步更新侧边栏实例名；
+      // 若用户显式自定义了实例名（如用于区分同一网络的不同节点/配置），不强制覆盖用户设置的实例名
+      const trimmedNetworkName = patch.network_name?.trim();
+      const shouldSyncName =
+        Boolean(trimmedNetworkName) &&
+        (current.name === current.config.network_name || current.name === '新网络' || current.name === '我的网络');
+      const nextName = shouldSyncName && trimmedNetworkName ? trimmedNetworkName : current.name;
       setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, name: nextName, config: nextConfig } : i)));
       setConfigSaved(true);
       window.setTimeout(() => setConfigSaved(false), 1500);

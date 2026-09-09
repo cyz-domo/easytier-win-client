@@ -177,11 +177,21 @@ export const healStatus = (s: Status): Status =>
   s === 'starting' || s === 'stopping' || s === 'running' ? 'stopped' : s;
 
 export const loadInstances = (): Instance[] => {
-  const saved = load<Instance[]>('easytier.instances.v2', []).map(i => ({
-    ...i,
-    status: healStatus(i.status),
-    config: { ...defaultConfig(), ...i.config } as NetworkConfig,
-  }));
+  const raw = load<Instance[]>('easytier.instances.v2', []);
+  const seenIds = new Set<string>();
+  const saved = raw.map(i => {
+    let id = i.id;
+    if (!id || seenIds.has(id)) {
+      id = crypto.randomUUID();
+    }
+    seenIds.add(id);
+    return {
+      ...i,
+      id,
+      status: healStatus(i.status),
+      config: { ...defaultConfig(), ...i.config } as NetworkConfig,
+    };
+  });
   return saved.length
     ? saved
     : [{ id: crypto.randomUUID(), name: '我的网络', status: 'stopped', rpcPort: 15888, config: defaultConfig() }];

@@ -90,12 +90,11 @@ export function useService(
         const states = await serviceRequest<ServiceInstanceState[]>('list_instances');
         setInstances(xs => {
           const mapped = xs.map(i => {
-            const s = states.find(x => x.id === i.id || (x.name && x.name.trim() === i.name.trim()));
+            const s = states.find(x => x.id === i.id);
             return s
               ? {
                   ...i,
-                  id: s.id, // 同步服务实例 ID，防止重复
-                  name: s.name || i.name,
+                  name: i.name || s.name || '网络实例',
                   rpcPort: s.rpc_port ?? i.rpcPort,
                   status: s.observed_state,
                   autoStart: s.auto_start,
@@ -107,11 +106,9 @@ export function useService(
               : i;
           });
           const existingIds = new Set(mapped.map(i => i.id));
-          const existingNames = new Set(mapped.map(i => i.name.trim()));
           const additions: Instance[] = [];
           for (const s of states) {
-            const sName = (s.name || '网络实例').trim();
-            if (!existingIds.has(s.id) && !existingNames.has(sName)) {
+            if (!existingIds.has(s.id)) {
               additions.push({
                 id: s.id,
                 name: s.name || '网络实例',

@@ -41,6 +41,13 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
   const [tomlDirty, setTomlDirty] = useState(false);
   const [tomlError, setTomlError] = useState<string | null>(null);
 
+  // 切换不同实例时，强制重置 TOML 编辑草稿与未保存状态，杜绝跨实例配置串改
+  useEffect(() => {
+    setTomlDraft(null);
+    setTomlDirty(false);
+    setTomlError(null);
+  }, [current?.id]);
+
   useEffect(() => {
     if (tomlDraft !== null && !tomlDirty) {
       setTomlDraft(encodeTOML(current.config));
@@ -54,7 +61,8 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
         config.listener_urls.length === current.config.listener_urls.length &&
         config.listener_urls.every((u, i) => u === current.config.listener_urls[i]);
       if (sameListeners) {
-        config.listener_urls = listenersForInstance(instances.indexOf(current) === 0 ? 0 : instances.indexOf(current));
+        const instIndex = Math.max(0, instances.findIndex(i => i.id === current.id));
+        config.listener_urls = listenersForInstance(instIndex);
       }
       patchConfig(config);
       addLog(`TOML 配置导入成功（监听器 ${config.listener_urls.join(', ')}）`);

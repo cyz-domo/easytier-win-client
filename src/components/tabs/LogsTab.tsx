@@ -15,13 +15,11 @@ interface LogsTabProps {
 
 function normalizeNetworkLogs(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(v => String(v));
-  if (typeof value === 'string') {
-    return value
-      .split('\n')
-      .map(s => s.trim())
-      .filter(Boolean);
-  }
-  return [];
+  const text = typeof value === 'string' ? value : (value as { text?: string } | null | undefined)?.text || '';
+  return text
+    .split(/\r?\n/)
+    .map(s => s.trim())
+    .filter(Boolean);
 }
 
 export const LogsTab: React.FC<LogsTabProps> = ({
