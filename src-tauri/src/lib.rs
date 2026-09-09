@@ -1455,14 +1455,26 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                // Closing the window only minimizes to the tray — networks
-                // keep running. Full teardown happens via the tray quit item.
-                api.prevent_close();
-                let _ = window.hide();
-                let _ = window.emit("app-window-visibility", false);
-                #[cfg(windows)]
-                trim_process_tree_working_set();
+            match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    // Closing the window only minimizes to the tray — networks
+                    // keep running. Full teardown happens via the tray quit item.
+                    api.prevent_close();
+                    let _ = window.emit("app-window-visibility", false);
+                    let _ = window.hide();
+                    #[cfg(windows)]
+                    trim_process_tree_working_set();
+                }
+                WindowEvent::Focused(focused) => {
+                    if *focused {
+                        let _ = window.emit("app-window-visibility", true);
+                    } else if window.is_minimized().unwrap_or(false) {
+                        let _ = window.emit("app-window-visibility", false);
+                        #[cfg(windows)]
+                        trim_process_tree_working_set();
+                    }
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![

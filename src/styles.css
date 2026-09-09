@@ -42,6 +42,14 @@
   box-sizing: border-box;
 }
 
+/* Complete freeze on rendering, animations, and transitions when window is hidden in tray */
+[data-window-hidden="true"] *,
+[data-window-hidden="true"] *::before,
+[data-window-hidden="true"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
 /* Dynamic Ambient Liquid Mesh Background */
 body {
   margin: 0;
@@ -217,49 +225,29 @@ nav {
   box-shadow: 0 4px 14px rgba(2, 132, 199, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.95);
 }
 
-/* Status Breathing Glow Indicators */
+/* Status Indicators (pure static glowing dots, 0% CPU/GPU overhead) */
 .dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: #cbd5e1;
   flex: none;
-  transition: all 0.3s;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .dot.on {
   background: #10b981;
-  box-shadow: 0 0 10px rgba(16, 185, 129, 0.7);
-  animation: pulse-glow 2.4s infinite ease-out;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
 }
 
 .dot.connecting {
   background: #f59e0b;
-  box-shadow: 0 0 10px rgba(245, 158, 11, 0.65);
-  animation: pulse-warn 1.8s infinite ease-out;
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.6);
 }
 
 .dot.err {
   background: #ef4444;
-  box-shadow: 0 0 10px rgba(239, 68, 68, 0.65);
-}
-
-@keyframes pulse-glow {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.65;
-  }
-}
-
-@keyframes pulse-warn {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.6;
-  }
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
 }
 
 .chevron {

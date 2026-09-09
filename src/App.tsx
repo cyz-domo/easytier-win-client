@@ -178,6 +178,13 @@ export default function App() {
   const serviceMode = service?.running === true && service?.healthy !== false;
   const serviceInstalled = service?.installed === true;
   const [isWindowVisible, setIsWindowVisible] = useState<boolean>(() => !document.hidden);
+  useEffect(() => {
+    if (isWindowVisible) {
+      document.documentElement.removeAttribute('data-window-hidden');
+    } else {
+      document.documentElement.setAttribute('data-window-hidden', 'true');
+    }
+  }, [isWindowVisible]);
   const logTimer = useRef<number | null>(null);
   const kernelTaskId = kernelUpdate?.task_id ?? null;
 
@@ -645,7 +652,7 @@ export default function App() {
   useEffect(() => {
     if (!service?.installed) return;
     const timer = window.setInterval(async () => {
-      if (document.hidden || recoveryRef.current) return;
+      if (!isWindowVisible || recoveryRef.current) return;
       try {
         const q = await invoke<{ installed: boolean; running: boolean }>('query_service_installation');
         if (q.installed && !q.running) {
