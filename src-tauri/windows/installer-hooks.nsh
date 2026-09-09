@@ -24,8 +24,9 @@
   ; Terminate processes, stop WinDivert kernel driver service, and rename any locked
   ; driver/DLL files so installer file replacement succeeds without reboot.
   FileOpen $1 "$PLUGINSDIR\stop-cores.ps1" w
-  FileWrite $1 "@('easytier-core', 'easytier-cli', 'easytier-win-client') | ForEach-Object { Get-Process -Name $$_ -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue }$\r$\n"
-  FileWrite $1 "@('WinDivert', 'WinDivert14') | ForEach-Object { & sc.exe stop $$_ 2>$$null; & sc.exe delete $$_ 2>$$null }$\r$\n"
+  FileWrite $1 "@('easytier-core', 'easytier-cli', 'easytier-win-client', 'easytier-service') | ForEach-Object { Get-Process -Name $$_ -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue }$\r$\n"
+  FileWrite $1 "if ('$INSTDIR') { Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $$_.Path -and $$_.Path.StartsWith('$INSTDIR', [System.StringComparison]::OrdinalIgnoreCase) } catch { $$false } } | Stop-Process -Force -ErrorAction SilentlyContinue }$\r$\n"
+  FileWrite $1 "@('WinDivert', 'WinDivert14', 'WinDivert22') | ForEach-Object { & sc.exe stop $$_ 2>$$null; & net.exe stop $$_ /y 2>$$null; Start-Sleep -Milliseconds 200; & sc.exe delete $$_ 2>$$null }$\r$\n"
   FileWrite $1 "$$dirs = @((Join-Path '$INSTDIR' 'core'), '$INSTDIR')$\r$\n"
   FileWrite $1 "foreach ($$dir in $$dirs) {$\r$\n"
   FileWrite $1 "  if (Test-Path $$dir) {$\r$\n"
