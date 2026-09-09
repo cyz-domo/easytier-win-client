@@ -90,7 +90,8 @@ jobs:
           # "easytier/third_party/<arch>/" (Packet.lib etc.); the crate sources
           # live in the cargo git checkout, so mirror them next to src-tauri.
           cargo fetch --manifest-path src-tauri/Cargo.toml
-          $tp = Resolve-Path "$env:CARGO_HOME\git\checkouts\easytier-*\*\easytier\third_party" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $tp = Resolve-Path "$cargoHome\git\checkouts\easytier-*\*\easytier\third_party" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $tp) { throw 'easytier third_party not found in cargo git checkouts' }
           New-Item -ItemType Directory -Force -Path src-tauri/easytier | Out-Null
           Copy-Item -Recurse -Force -Path $tp.Path -Destination src-tauri/easytier/third_party
