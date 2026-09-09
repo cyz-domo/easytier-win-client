@@ -1564,6 +1564,21 @@ fn parse_host_port(address: &str) -> Option<(String, u16)> {
     }
 }
 
+fn is_fake_ip_or_loopback(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            let octets = ipv4.octets();
+            // 198.18.0.0/15 is RFC 2544 benchmark pool used by Clash/Sing-box/Mihomo for Fake-IP
+            (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+            // 127.0.0.0/8 loopback
+            || octets[0] == 127
+            // 0.0.0.0
+            || octets[0] == 0
+        }
+        std::net::IpAddr::V6(ipv6) => ipv6.is_loopback(),
+    }
+}
+
 fn tcp_ping(host: &str, port: u16, timeout: std::time::Duration) -> Option<i64> {
     use std::net::{TcpStream, ToSocketAddrs};
     let addr_str = if host.starts_with('[') && host.ends_with(']') {
@@ -1579,9 +1594,21 @@ fn tcp_ping(host: &str, port: u16, timeout: std::time::Duration) -> Option<i64> 
 
     let start = std::time::Instant::now();
     for addr in addrs {
+        // If DNS resolved to a Fake-IP proxy pool or loopback, connecting to it
+        // only connects to the local TUN proxy adapter in 0ms, which is invalid.
+        if is_fake_ip_or_loopback(&addr.ip()) {
+            return None;
+        }
+
         if let Ok(stream) = TcpStream::connect_timeout(&addr, timeout) {
             drop(stream);
-            return Some(start.elapsed().as_millis() as i64);
+            let elapsed = start.elapsed().as_millis() as i64;
+            // Over the public Internet, physical round-trip time cannot be < 2ms.
+            // Latency < 2ms indicates local proxy/TUN virtual network adapter interception.
+            if elapsed < 2 {
+                return None;
+            }
+            return Some(elapsed);
         }
     }
     None
@@ -1591,7 +1618,8 @@ fn batch_tcp_ping(nodes: &mut [PublicNodeInfo]) {
     use std::thread;
     let mut targets = Vec::new();
     for (idx, node) in nodes.iter().enumerate() {
-        if !node.is_masked && node.is_online {
+        // Only ping unmasked online nodes with TCP-compatible schemes
+        if !node.is_masked && node.is_online && !node.address.starts_with("txt://") {
             if let Some((host, port)) = parse_host_port(&node.address) {
                 targets.push((idx, host, port));
             }
@@ -1800,8 +1828,8 @@ async fn fetch_public_nodes(force_refresh: Option<bool>) -> Result<PublicNodesRe
             if a.is_online != b.is_online {
                 return b.is_online.cmp(&a.is_online);
             }
-            let ping_a = a.local_ping_ms.or(a.ping_ms).unwrap_or(9999);
-            let ping_b = b.local_ping_ms.or(b.ping_ms).unwrap_or(9999);
+            let ping_a = a.local_ping_ms.filter(|&ms| ms >= 2).or(a.ping_ms).unwrap_or(9999);
+            let ping_b = b.local_ping_ms.filter(|&ms| ms >= 2).or(b.ping_ms).unwrap_or(9999);
             ping_a.cmp(&ping_b)
         });
 

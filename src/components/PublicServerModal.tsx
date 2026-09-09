@@ -117,10 +117,14 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
       if (a.is_masked !== b.is_masked) return a.is_masked ? 1 : -1;
       // 在线节点优先
       if (a.is_online !== b.is_online) return a.is_online ? -1 : 1;
-      // 本机真实延迟从低到高优先，无本机延迟则回退机房延迟
-      const pingA = a.local_ping_ms ?? (a.ping_ms != null ? a.ping_ms + 200 : 9999);
-      const pingB = b.local_ping_ms ?? (b.ping_ms != null ? b.ping_ms + 200 : 9999);
-      return pingA - pingB;
+      // 真实延迟从低到高：有效本机延迟(>=2ms)优先，否则使用监控站真实探针延迟
+      const getEffectivePing = (n: PublicNode) => {
+        if (n.local_ping_ms != null && n.local_ping_ms >= 2) {
+          return n.local_ping_ms;
+        }
+        return n.ping_ms ?? 9999;
+      };
+      return getEffectivePing(a) - getEffectivePing(b);
     });
   }, [nodes, activeTab]);
 
@@ -261,14 +265,24 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
                       <strong className="node-address" title={node.address}>
                         {node.address}
                       </strong>
-                      {node.local_ping_ms != null ? (
-                        <span
-                          className="node-status-badge online"
-                          title={`本机直接 TCP 握手测速延迟: ${node.local_ping_ms} ms`}
-                        >
-                          <span className="status-dot-sm" />
-                          本机 {node.local_ping_ms} ms
-                        </span>
+                      {node.local_ping_ms != null && node.local_ping_ms >= 2 ? (
+                        <>
+                          <span
+                            className="node-status-badge online"
+                            title={`本机真实 TCP 握手测速延迟: ${node.local_ping_ms} ms`}
+                          >
+                            <span className="status-dot-sm" />
+                            本机 {node.local_ping_ms} ms
+                          </span>
+                          {node.ping_ms != null && (
+                            <span
+                              className="probe-badge"
+                              title={`第三方探针机房参考延迟: ${node.ping_ms} ms`}
+                            >
+                              机房 {node.ping_ms} ms
+                            </span>
+                          )}
+                        </>
                       ) : node.is_masked ? (
                         <span className="node-status-badge masked" title="地址包含*掩码，需加群获取完整地址测速">
                           <span className="status-dot-sm" />
@@ -279,21 +293,16 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
                           className={`node-status-badge ${
                             node.is_online ? 'online' : 'offline'
                           }`}
-                          title={`第三方探针机房延迟: ${node.ping_ms ?? '未知'} ms`}
+                          title={
+                            node.is_online
+                              ? `节点在线 · 延迟 ${node.ping_ms ?? '未知'} ms（已防代理虚假 0ms 拦截，展示真实探针延迟）`
+                              : '节点离线'
+                          }
                         >
                           <span className="status-dot-sm" />
                           {node.is_online
-                            ? `${node.ping_ms != null ? `机房 ${node.ping_ms} ms` : '在线'}`
+                            ? `${node.ping_ms != null ? `${node.ping_ms} ms` : '在线'}`
                             : '离线'}
-                        </span>
-                      )}
-
-                      {node.local_ping_ms != null && node.ping_ms != null && (
-                        <span
-                          className="probe-badge"
-                          title={`第三方探针机房延迟: ${node.ping_ms} ms`}
-                        >
-                          机房 {node.ping_ms} ms
                         </span>
                       )}
                     </div>
