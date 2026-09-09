@@ -61,47 +61,29 @@ body {
   position: relative;
 }
 
+/* Static clean background accents (zero continuous CPU/GPU rasterization load) */
 .app-shell:before,
 .app-shell:after {
   content: '';
   position: fixed;
   z-index: -1;
-  width: 580px;
-  height: 580px;
-  border-radius: 46% 54% 50% 50% / 54% 48% 52% 46%;
-  filter: blur(95px);
-  opacity: 0.65;
+  width: 500px;
+  height: 500px;
+  border-radius: 50%;
   pointer-events: none;
-  will-change: transform, border-radius;
+  opacity: 0.35;
 }
 
 .app-shell:before {
-  top: -6%;
-  right: -2%;
-  background: radial-gradient(circle, #38bdf8 0%, #0284c7 40%, #818cf8 90%);
-  animation: liquid-drift 24s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate;
+  top: -100px;
+  right: -80px;
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.45) 0%, rgba(2, 132, 199, 0.15) 50%, transparent 70%);
 }
 
 .app-shell:after {
-  bottom: -8%;
-  left: 2%;
-  background: radial-gradient(circle, #34d399 0%, #06b6d4 45%, #60a5fa 95%);
-  animation: liquid-drift 30s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate-reverse;
-}
-
-@keyframes liquid-drift {
-  0% {
-    transform: translate(0, 0) rotate(0deg) scale(1);
-    border-radius: 46% 54% 50% 50% / 54% 48% 52% 46%;
-  }
-  50% {
-    transform: translate(-70px, 50px) rotate(90deg) scale(1.15);
-    border-radius: 58% 42% 62% 38% / 44% 56% 44% 56%;
-  }
-  100% {
-    transform: translate(-120px, 90px) rotate(180deg) scale(1.05);
-    border-radius: 42% 58% 40% 60% / 60% 40% 60% 40%;
-  }
+  bottom: -100px;
+  left: -60px;
+  background: radial-gradient(circle, rgba(52, 211, 153, 0.35) 0%, rgba(6, 182, 212, 0.12) 50%, transparent 70%);
 }
 
 /* Translucent Frosted Sidebar */
@@ -263,26 +245,20 @@ nav {
 }
 
 @keyframes pulse-glow {
-  0% {
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6);
+  0%, 100% {
+    opacity: 1;
   }
-  70% {
-    box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+  50% {
+    opacity: 0.65;
   }
 }
 
 @keyframes pulse-warn {
-  0% {
-    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.6);
+  0%, 100% {
+    opacity: 1;
   }
-  70% {
-    box-shadow: 0 0 0 7px rgba(245, 158, 11, 0);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0);
+  50% {
+    opacity: 0.6;
   }
 }
 

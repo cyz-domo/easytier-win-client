@@ -177,6 +177,7 @@ export default function App() {
   const [remoteConfigTarget, setRemoteConfigTarget] = useState<{ host: string; port: number; candidatePorts?: number[] } | null>(null);
   const serviceMode = service?.running === true && service?.healthy !== false;
   const serviceInstalled = service?.installed === true;
+  const [isWindowVisible, setIsWindowVisible] = useState<boolean>(() => !document.hidden);
   const logTimer = useRef<number | null>(null);
   const kernelTaskId = kernelUpdate?.task_id ?? null;
 
@@ -261,7 +262,8 @@ export default function App() {
   const lastTotalBytesRef = useRef<{ rx: number; tx: number; time: number } | null>(null);
 
   useEffect(() => {
-    if (!runningNow || !current?.rpcPort) {
+    // Only perform 1-second real-time sampling when running, window is visible, and user is on the status overview tab
+    if (!runningNow || !current?.rpcPort || !isWindowVisible || tab !== 'status') {
       setCurrentRxSpeed(0);
       setCurrentTxSpeed(0);
       lastTotalBytesRef.current = null;
@@ -303,7 +305,7 @@ export default function App() {
       alive = false;
       clearInterval(timer);
     };
-  }, [runningNow, current?.id, current?.rpcPort]);
+  }, [runningNow, current?.id, current?.rpcPort, isWindowVisible, tab]);
 
   const peakSpeed = useMemo(
     () => Math.max(0, ...trafficHistory.map(s => Math.max(s.rxSpeed, s.txSpeed))),
@@ -683,7 +685,10 @@ export default function App() {
   }, [serviceMode, isElevated]);
   const clearNetworkLogs = () => setNetworkLogs([]);
   useEffect(() => {
-    if (current?.status !== 'running') { clearNetworkLogs(); return; }
+    if (current?.status !== 'running' || !isWindowVisible || tab !== 'logs') {
+      if (current?.status !== 'running') clearNetworkLogs();
+      return;
+    }
     let alive = true;
     let timer: number | null = null;
     const refresh = async () => {
@@ -698,7 +703,7 @@ export default function App() {
     };
     void refresh();
     return () => { alive = false; if (timer != null) window.clearTimeout(timer); };
-  }, [current?.id, current?.status, serviceMode, refreshSecs]);
+  }, [current?.id, current?.status, serviceMode, refreshSecs, isWindowVisible, tab]);
 
   // A core restart resets the per-connection traffic counters — clear the
   // accumulated totals for that instance so the ledger restarts with it.
@@ -806,18 +811,16 @@ export default function App() {
     const running = instances.filter(i => i.status === 'running' && i.rpcPort);
     if (running.length === 0) { setStatusByInstance({}); return; }
     const pollWorthy = tab === 'status' || tab === 'peers' || tab === 'routes';
-    if (!pollWorthy || document.hidden) return;
+    if (!pollWorthy || !isWindowVisible) return;
     let alive = true;
     let timer: number | null = null;
     const refresh = async () => {
       const results = await Promise.all(running.map(async ({ id, rpcPort }) => {
         try {
-          // One persistent-connection RPC query replaces three CLI subprocess
-          // spawns — ~1ms warm instead of ~0.5s of process overhead.
           const snapshot = await invoke<InstanceSnapshot>('status_query', { port: rpcPort });
           return [id, snapshot] as const;
         } catch {
-          return [id, null] as const; // keep last-known data on failure
+          return [id, null] as const;
         }
       }));
       if (!alive) return;
@@ -828,7 +831,9 @@ export default function App() {
         }
         return next;
       });
-      // Accumulate per-peer traffic deltas (reset-aware).
+
+      // Accumulate per-peer traffic deltas into a single batched state update
+      const updates: Record<string, { rx: number; tx: number }> = {};
       for (const [id, snapshot] of results) {
         if (!snapshot) continue;
         for (const p of snapshot.peers) {
@@ -837,50 +842,64 @@ export default function App() {
           const key = `${id}:${p.hostname || p.id || 'peer'}:${normalizedIp}`;
           const rx = parseHumanBytes(p.rx_bytes);
           const tx = parseHumanBytes(p.tx_bytes);
-          const last = lastPeerCounters.current[key];
-          lastPeerCounters.current[key] = { rx, tx };
-
-          setTrafficTotals(m => {
-            const cur = m[key];
-            if (!cur) {
-              // First time seeing this peer: seed with existing cumulative bytes from core!
-              const nextM = { ...m, [key]: { rx, tx } };
-              localStorage.setItem('easytier.traffic.v1', JSON.stringify(nextM));
-              return nextM;
-            }
-            if (!last) {
-              // Page refreshed, but we have cur recorded in localStorage:
-              // If core's rx > cur.rx, count the difference
-              const drx = rx > cur.rx ? rx - cur.rx : 0;
-              const dtx = tx > cur.tx ? tx - cur.tx : 0;
-              if (drx === 0 && dtx === 0) return m;
-              const nextM = { ...m, [key]: { rx: cur.rx + drx, tx: cur.tx + dtx } };
-              localStorage.setItem('easytier.traffic.v1', JSON.stringify(nextM));
-              return nextM;
-            }
-            const drx = rx >= last.rx ? rx - last.rx : rx;
-            const dtx = tx >= last.tx ? tx - last.tx : tx;
-            if (drx === 0 && dtx === 0) return m;
-            const nextM = { ...m, [key]: { rx: cur.rx + drx, tx: cur.tx + dtx } };
-            localStorage.setItem('easytier.traffic.v1', JSON.stringify(nextM));
-            return nextM;
-          });
+          updates[key] = { rx, tx };
         }
       }
+
+      if (Object.keys(updates).length > 0) {
+        setTrafficTotals(m => {
+          let changed = false;
+          const nextM = { ...m };
+          for (const [key, { rx, tx }] of Object.entries(updates)) {
+            const cur = nextM[key];
+            const last = lastPeerCounters.current[key];
+            lastPeerCounters.current[key] = { rx, tx };
+
+            if (!cur) {
+              nextM[key] = { rx, tx };
+              changed = true;
+            } else if (last) {
+              const drx = rx >= last.rx ? rx - last.rx : rx;
+              const dtx = tx >= last.tx ? tx - last.tx : tx;
+              if (drx > 0 || dtx > 0) {
+                nextM[key] = { rx: cur.rx + drx, tx: cur.tx + dtx };
+                changed = true;
+              }
+            } else {
+              const drx = rx > cur.rx ? rx - cur.rx : 0;
+              const dtx = tx > cur.tx ? tx - cur.tx : 0;
+              if (drx > 0 || dtx > 0) {
+                nextM[key] = { rx: cur.rx + drx, tx: cur.tx + dtx };
+                changed = true;
+              }
+            }
+          }
+          if (changed) {
+            try { localStorage.setItem('easytier.traffic.v1', JSON.stringify(nextM)); } catch {}
+            return nextM;
+          }
+          return m;
+        });
+      }
+
       timer = window.setTimeout(() => void refresh(), refreshSecs * 1000);
     };
     void refresh();
     return () => { alive = false; if (timer != null) window.clearTimeout(timer); };
-  }, [instances, tab, refreshSecs, pollEpoch, serviceMode]);
+  }, [instances, tab, refreshSecs, pollEpoch, serviceMode, isWindowVisible]);
 
 
 
   // Re-arm status polling when the window becomes visible again; the polling
   // effect above deliberately skips rounds while document.hidden is true.
   useEffect(() => {
-    const onVisible = () => setPollEpoch(n => n + 1);
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    const onVisibilityChange = () => {
+      const visible = !document.hidden;
+      setIsWindowVisible(visible);
+      if (visible) setPollEpoch(n => n + 1);
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, []);
 
   // Append runtime messages to the log pane.
@@ -1097,6 +1116,13 @@ export default function App() {
     let unlistenCopy: UnlistenFn | undefined;
     let unlistenToggle: UnlistenFn | undefined;
     let unlistenResume: UnlistenFn | undefined;
+    let unlistenVisibility: UnlistenFn | undefined;
+
+    void listen<boolean>('app-window-visibility', (event) => {
+      const visible = Boolean(event.payload);
+      setIsWindowVisible(visible);
+      if (visible) setPollEpoch(n => n + 1);
+    }).then(fn => { unlistenVisibility = fn; });
 
     void listen('tray-copy-ip', () => {
       if (activeVirtualIp) {
@@ -1141,6 +1167,7 @@ export default function App() {
       if (unlistenCopy) unlistenCopy();
       if (unlistenToggle) unlistenToggle();
       if (unlistenResume) unlistenResume();
+      if (unlistenVisibility) unlistenVisibility();
     };
   }, [activeVirtualIp, toggle, serviceMode, instances]);
 

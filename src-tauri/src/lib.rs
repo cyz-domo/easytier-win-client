@@ -729,6 +729,16 @@ mod job_object {
             // exits, which kills every assigned child.
         }
     }
+
+    /// Assigns the current process to a kill-on-close Job Object so all child
+    /// processes (WebView2 browser, renderers, GPU process, CLI) are guaranteed
+    /// to be terminated by Windows kernel when this process terminates.
+    pub fn init_global_job() {
+        unsafe {
+            use windows_sys::Win32::System::Threading::GetCurrentProcess;
+            kill_on_close(GetCurrentProcess());
+        }
+    }
 }
 
 #[tauri::command]
@@ -1079,6 +1089,38 @@ fn quit_and_stop_networks(app: &tauri::AppHandle) {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+
+        // 6. Explicitly terminate any child processes (including WebView2 renderers & GPU processes)
+        unsafe {
+            use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+                TH32CS_SNAPPROCESS,
+            };
+            use windows_sys::Win32::System::Threading::{
+                GetCurrentProcessId, OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+            };
+            let my_pid = GetCurrentProcessId();
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snapshot != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+                let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+                entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+                if Process32FirstW(snapshot, &mut entry) != 0 {
+                    loop {
+                        if entry.th32ParentProcessID == my_pid {
+                            let child_handle = OpenProcess(PROCESS_TERMINATE, 0, entry.th32ProcessID);
+                            if child_handle != 0 {
+                                TerminateProcess(child_handle, 1);
+                                windows_sys::Win32::Foundation::CloseHandle(child_handle);
+                            }
+                        }
+                        if Process32NextW(snapshot, &mut entry) == 0 {
+                            break;
+                        }
+                    }
+                }
+                windows_sys::Win32::Foundation::CloseHandle(snapshot);
+            }
+        }
     }
     std::process::exit(0);
 }
@@ -1298,13 +1340,17 @@ pub fn run() {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
+                let _ = window.emit("app-window-visibility", true);
             }
         }))
         .manage(Mutex::new(RuntimeProcesses::default()))
         .manage(KernelUpdateLock::default())
         .setup(|app| {
             #[cfg(windows)]
-            power_monitor::windows_power::init_power_monitor(app.handle().clone());
+            {
+                job_object::init_global_job();
+                power_monitor::windows_power::init_power_monitor(app.handle().clone());
+            }
 
             let show =
                 tauri::menu::MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?;
@@ -1324,6 +1370,7 @@ pub fn run() {
                             let _ = window.show();
                             let _ = window.unminimize();
                             let _ = window.set_focus();
+                            let _ = window.emit("app-window-visibility", true);
                         }
                     }
                     "copy_ip" => {
@@ -1382,6 +1429,7 @@ pub fn run() {
                             let _ = window.show();
                             let _ = window.unminimize();
                             let _ = window.set_focus();
+                            let _ = window.emit("app-window-visibility", true);
                         }
                     }
                     "quit" => quit_and_stop_networks(&app),
@@ -1399,6 +1447,7 @@ pub fn run() {
                             let _ = window.show();
                             let _ = window.unminimize();
                             let _ = window.set_focus();
+                            let _ = window.emit("app-window-visibility", true);
                         }
                     }
                 })
@@ -1411,6 +1460,7 @@ pub fn run() {
                 // keep running. Full teardown happens via the tray quit item.
                 api.prevent_close();
                 let _ = window.hide();
+                let _ = window.emit("app-window-visibility", false);
                 #[cfg(windows)]
                 trim_process_tree_working_set();
             }
