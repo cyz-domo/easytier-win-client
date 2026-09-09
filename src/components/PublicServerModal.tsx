@@ -15,6 +15,12 @@ export interface PublicNode {
   description: string;
 }
 
+export interface PublicNodesResponse {
+  nodes: PublicNode[];
+  is_fallback: boolean;
+  updated_at: number;
+}
+
 interface PublicServerModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -29,16 +35,25 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
   currentAddress,
 }) => {
   const [nodes, setNodes] = useState<PublicNode[]>([]);
+  const [isFallback, setIsFallback] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'domestic' | 'overseas'>('domestic');
 
-  const fetchNodes = useCallback(async () => {
+  const fetchNodes = useCallback(async (force = false) => {
     setLoading(true);
     setError(null);
     try {
-      const data = await invoke<PublicNode[]>('fetch_public_nodes');
-      setNodes(data);
+      const data = await invoke<PublicNodesResponse | PublicNode[]>('fetch_public_nodes', {
+        forceRefresh: force,
+      });
+      if (Array.isArray(data)) {
+        setNodes(data);
+        setIsFallback(false);
+      } else if (data && Array.isArray(data.nodes)) {
+        setNodes(data.nodes);
+        setIsFallback(Boolean(data.is_fallback));
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -49,7 +64,7 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       if (nodes.length === 0) {
-        void fetchNodes();
+        void fetchNodes(false);
       }
     }
   }, [isOpen, nodes.length, fetchNodes]);
@@ -108,7 +123,7 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
                 EasyTier 公共节点选择器
               </h3>
               <small style={{ color: 'var(--ink-3)', fontSize: 11 }}>
-                实时状态与延迟测速 · 数据源自社区监控
+                实时状态与延迟测速 · 数据源自第三方监控站（延迟为探针机房参考值）
               </small>
             </div>
           </div>
@@ -117,9 +132,9 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
               type="button"
               className="ghost"
               style={{ fontSize: 12, padding: '4px 8px', display: 'inline-flex', alignItems: 'center', gap: 4 }}
-              onClick={() => void fetchNodes()}
+              onClick={() => void fetchNodes(true)}
               disabled={loading}
-              title="刷新实时在线状态与延迟"
+              title="强制穿透缓存，刷新最新在线状态与延迟"
             >
               <span className={loading ? 'icon-spin' : ''} style={{ display: 'inline-flex' }}>
                 <IconRefresh size={13} />
@@ -137,6 +152,22 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Fallback Banner Notice */}
+        {isFallback && (
+          <div className="fallback-notice-banner">
+            <span>⚠️ 无法连接到监控服务器，当前已自动切换至内置推荐高可用节点。</span>
+            <button
+              type="button"
+              className="ghost"
+              style={{ fontSize: 11, padding: '2px 6px', color: 'var(--accent)', cursor: 'pointer' }}
+              onClick={() => void fetchNodes(true)}
+              disabled={loading}
+            >
+              重试在线拉取
+            </button>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="public-server-tabs">

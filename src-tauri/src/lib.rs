@@ -1362,6 +1362,16 @@ pub struct PublicNodeInfo {
     pub description: String,
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct PublicNodesResponse {
+    pub nodes: Vec<PublicNodeInfo>,
+    pub is_fallback: bool,
+    pub updated_at: u64,
+}
+
+static PUBLIC_NODES_CACHE: Mutex<Option<(std::time::Instant, PublicNodesResponse)>> = Mutex::new(None);
+const PUBLIC_NODES_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
 fn default_fallback_nodes() -> Vec<PublicNodeInfo> {
     vec![
         PublicNodeInfo {
@@ -1451,15 +1461,78 @@ fn default_fallback_nodes() -> Vec<PublicNodeInfo> {
     ]
 }
 
+/// Robustly extracts node address from raw monitor names.
+/// Correctly handles IPv4, domain names, AND bracketed IPv6 hosts (e.g. tcp://[2400:...]:11010).
+fn extract_node_address(raw_name: &str) -> Option<String> {
+    let idx = raw_name.find("://")?;
+    let scheme_start = raw_name[..idx]
+        .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let scheme = &raw_name[scheme_start..idx];
+    let rest = &raw_name[idx + 3..];
+
+    let host_port = if rest.starts_with('[') {
+        // IPv6 bracketed host: [2400:...]:11010(...)
+        if let Some(bracket_end) = rest.find(']') {
+            let after = &rest[bracket_end + 1..];
+            let end_offset = after
+                .find(|c: char| c.is_whitespace() || c == '（' || c == '(' || c == '【' || c == '[' || c == '，' || c == ',')
+                .unwrap_or(after.len());
+            &rest[..bracket_end + 1 + end_offset]
+        } else {
+            let end_offset = rest
+                .find(|c: char| c.is_whitespace() || c == '（' || c == '(' || c == '【')
+                .unwrap_or(rest.len());
+            &rest[..end_offset]
+        }
+    } else {
+        // IPv4 or domain name: 225284.xyz:11010(...)
+        let end_offset = rest
+            .find(|c: char| c.is_whitespace() || c == '（' || c == '(' || c == '[' || c == '【' || c == '，' || c == ',')
+            .unwrap_or(rest.len());
+        &rest[..end_offset]
+    };
+
+    let cleaned = host_port.trim_end_matches(|c: char| c == '/' || c == ' ' || c == ')' || c == '）' || c == ']' || c == '】');
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(format!("{}://{}", scheme, cleaned))
+    }
+}
+
 #[tauri::command]
-async fn fetch_public_nodes() -> Result<Vec<PublicNodeInfo>, String> {
-    tokio::task::spawn_blocking(|| {
+async fn fetch_public_nodes(force_refresh: Option<bool>) -> Result<PublicNodesResponse, String> {
+    let force = force_refresh.unwrap_or(false);
+    if !force {
+        if let Ok(guard) = PUBLIC_NODES_CACHE.lock() {
+            if let Some((instant, ref cached)) = *guard {
+                if instant.elapsed() < PUBLIC_NODES_CACHE_TTL {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+    }
+
+    let resp = tokio::task::spawn_blocking(|| {
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let fallback_resp = PublicNodesResponse {
+            nodes: default_fallback_nodes(),
+            is_fallback: true,
+            updated_at: now_ts,
+        };
+
         let client = match reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(6))
             .build()
         {
             Ok(c) => c,
-            Err(_) => return Ok(default_fallback_nodes()),
+            Err(_) => return fallback_resp,
         };
 
         let status_res = client
@@ -1467,7 +1540,7 @@ async fn fetch_public_nodes() -> Result<Vec<PublicNodeInfo>, String> {
             .send();
         let status_json: Value = match status_res.and_then(|r| r.json()) {
             Ok(j) => j,
-            Err(_) => return Ok(default_fallback_nodes()),
+            Err(_) => return fallback_resp,
         };
 
         let heartbeat_json: Value = client
@@ -1509,25 +1582,10 @@ async fn fetch_public_nodes() -> Result<Vec<PublicNodeInfo>, String> {
                         let id = mon.get("id").and_then(|i| i.as_i64()).unwrap_or(0);
                         let raw_name = mon.get("name").and_then(|n| n.as_str()).unwrap_or("");
 
-                        // Parse address from raw_name, e.g. "[我的]tcp://225284.xyz:11010（海波：上海电信 / 可中转）"
-                        let mut address = String::new();
-                        if let Some(idx) = raw_name.find("://") {
-                            let scheme_start = raw_name[..idx]
-                                .rfind(|c: char| !c.is_alphanumeric() && c != '_')
-                                .map(|i| i + 1)
-                                .unwrap_or(0);
-                            let rest = &raw_name[idx + 3..];
-                            let end_offset = rest
-                                .find(|c: char| c.is_whitespace() || c == '（' || c == '(' || c == '[' || c == '【')
-                                .unwrap_or(rest.len());
-                            let scheme = &raw_name[scheme_start..idx];
-                            let host_port = &rest[..end_offset];
-                            address = format!("{}://{}", scheme, host_port);
-                        }
-
-                        if address.is_empty() {
-                            continue;
-                        }
+                        let address = match extract_node_address(raw_name) {
+                            Some(addr) => addr,
+                            None => continue,
+                        };
 
                         let is_masked = address.contains('*');
                         let can_relay = !raw_name.contains("禁中转");
@@ -1604,10 +1662,22 @@ async fn fetch_public_nodes() -> Result<Vec<PublicNodeInfo>, String> {
             ping_a.cmp(&ping_b)
         });
 
-        Ok(nodes)
+        PublicNodesResponse {
+            nodes,
+            is_fallback: false,
+            updated_at: now_ts,
+        }
     })
     .await
-    .map_err(|e| format!("spawn_blocking error: {e}"))?
+    .map_err(|e| format!("spawn_blocking error: {e}"))?;
+
+    if !resp.is_fallback {
+        if let Ok(mut guard) = PUBLIC_NODES_CACHE.lock() {
+            *guard = Some((std::time::Instant::now(), resp.clone()));
+        }
+    }
+
+    Ok(resp)
 }
 
 #[tauri::command]
