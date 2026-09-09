@@ -1,12 +1,9 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { defaultConfig, listenersForInstance, NetworkConfig } from '../network-config';
-import { encodeTOML } from '../toml-codec';
-import { Instance, load, loadInstances, nextRpcPort, Status } from '../types';
+import { Instance, load, loadInstances, nextRpcPort } from '../types';
 
 export function useInstances(
-  serviceMode: boolean,
-  serviceChecking: boolean,
   addLog: (msg: string) => void,
   showToast: (msg: string) => void,
   clearInstanceTraffic: (id: string) => void
@@ -14,9 +11,6 @@ export function useInstances(
   const [instances, setInstances] = useState<Instance[]>(loadInstances);
   const [activeId, setActiveId] = useState<string>(() => load('easytier.active.v2', ''));
   const [configSaved, setConfigSaved] = useState(false);
-
-  // 跟踪已尝试自动连接的实例 ID 集合，解决实例分批异步加载引发的连接跳过竞态
-  const attemptedAutoConnectIds = useRef<Set<string>>(new Set());
 
   // 持久化实例列表与当前选中项
   useEffect(() => {
@@ -88,46 +82,6 @@ export function useInstances(
     },
     [current]
   );
-
-  // 启动全链路自启动：监听 instances 列表变化，凡发现 autoStart 为 true 且未连接也未尝试过的，立即连接
-  useEffect(() => {
-    if (serviceChecking || serviceMode || instances.length === 0) return;
-
-    const toStart = instances.filter(
-      i => i.autoStart && i.status !== 'running' && !attemptedAutoConnectIds.current.has(i.id)
-    );
-
-    if (toStart.length === 0) return;
-
-    for (const inst of toStart) {
-      attemptedAutoConnectIds.current.add(inst.id);
-      void (async () => {
-        try {
-          addLog(`[${inst.name}] 检测到已开启自启动，正在自动连接网络…`);
-          clearInstanceTraffic(inst.id);
-          const toml = encodeTOML(inst.config);
-          await invoke('start_instance', {
-            id: inst.id,
-            config: toml,
-            rpcPortal: inst.remoteManageEnabled ? undefined : `127.0.0.1:${inst.rpcPort}`,
-            remoteManageEnabled: inst.remoteManageEnabled ?? false,
-            rpcWhitelistCidrs: inst.rpcWhitelistCidrs ?? [],
-          });
-          await new Promise(r => setTimeout(r, 1200));
-          const s = await invoke<{ status: Status; error?: string }>('wait_for_exit', { id: inst.id });
-          if (s.status === 'failed') {
-            addLog(`[${inst.name}] 自动启动失败: ${s.error || 'core 启动异常'}`);
-          } else {
-            setInstances(xs => xs.map(i => (i.id === inst.id ? { ...i, status: 'running' } : i)));
-            addLog(`[${inst.name}] 网络已自动启动运行`);
-            showToast(`✓ 已自动连接网络: ${inst.name}`);
-          }
-        } catch (err) {
-          addLog(`[${inst.name}] 自动连接异常: ${String(err)}`);
-        }
-      })();
-    }
-  }, [instances, serviceChecking, serviceMode, addLog, showToast, clearInstanceTraffic]);
 
   return {
     instances,

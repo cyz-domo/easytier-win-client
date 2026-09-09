@@ -88,22 +88,7 @@ export default function App() {
     });
   }, []);
 
-  // 1. Service Hook
-  const [instancesProxy, setInstancesProxy] = useState<Instance[]>([]);
-  const {
-    service,
-    serviceChecking,
-    serviceBusy,
-    setServiceBusy,
-    serviceResult,
-    setServiceResult,
-    serviceRecovery,
-    serviceMode,
-    wasServiceModeRef,
-    refreshService,
-  } = useService(instancesProxy, setInstancesProxy, isWindowVisible);
-
-  // 2. Instances Hook
+  // 1. Instances Hook
   const {
     instances,
     setInstances,
@@ -116,20 +101,24 @@ export default function App() {
     renameInstance,
     patchConfig,
   } = useInstances(
-    serviceMode,
-    serviceChecking,
     addLog,
     showToast,
     (id: string) => clearInstanceTraffic(id)
   );
 
-  // Sync instances to service proxy
-  useEffect(() => {
-    setInstancesProxy(instances);
-  }, [instances]);
-
-  const currentRef = useRef(current);
-  currentRef.current = current;
+  // 2. Service Hook (直接操作真实的 setInstances)
+  const {
+    service,
+    serviceChecking,
+    serviceBusy,
+    setServiceBusy,
+    serviceResult,
+    setServiceResult,
+    serviceRecovery,
+    serviceMode,
+    wasServiceModeRef,
+    refreshService,
+  } = useService(setInstances, isWindowVisible);
 
   // 3. Traffic Hook
   const {
@@ -141,6 +130,47 @@ export default function App() {
     clearInstanceTraffic,
     recordPollResults,
   } = useTraffic(instances, current, isWindowVisible, tab);
+
+  // 启动全链路自启动：在非服务模式下，监听 instances 列表变化自动拉起
+  const attemptedAutoConnectIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (serviceChecking || serviceMode || instances.length === 0) return;
+    const toStart = instances.filter(
+      i => i.autoStart && i.status !== 'running' && !attemptedAutoConnectIds.current.has(i.id)
+    );
+    if (toStart.length === 0) return;
+    for (const inst of toStart) {
+      attemptedAutoConnectIds.current.add(inst.id);
+      void (async () => {
+        try {
+          addLog(`[${inst.name}] 检测到已开启自启动，正在自动连接网络…`);
+          clearInstanceTraffic(inst.id);
+          const toml = encodeTOML(inst.config);
+          await invoke('start_instance', {
+            id: inst.id,
+            config: toml,
+            rpcPortal: inst.remoteManageEnabled ? undefined : `127.0.0.1:${inst.rpcPort}`,
+            remoteManageEnabled: inst.remoteManageEnabled ?? false,
+            rpcWhitelistCidrs: inst.rpcWhitelistCidrs ?? [],
+          });
+          await new Promise(r => setTimeout(r, 1200));
+          const s = await invoke<{ status: Status; error?: string }>('wait_for_exit', { id: inst.id });
+          if (s.status === 'failed') {
+            addLog(`[${inst.name}] 自动启动失败: ${s.error || 'core 启动异常'}`);
+          } else {
+            setInstances(xs => xs.map(i => (i.id === inst.id ? { ...i, status: 'running' } : i)));
+            addLog(`[${inst.name}] 网络已自动启动运行`);
+            showToast(`✓ 已自动连接网络: ${inst.name}`);
+          }
+        } catch (err) {
+          addLog(`[${inst.name}] 自动连接异常: ${String(err)}`);
+        }
+      })();
+    }
+  }, [instances, serviceChecking, serviceMode, addLog, showToast, clearInstanceTraffic, setInstances]);
+
+  const currentRef = useRef(current);
+  currentRef.current = current;
 
   // 4. Kernel Update Hook
   const {
@@ -463,6 +493,9 @@ export default function App() {
         await serviceRequest(running ? 'stop_instance' : 'start_instance', { instance_id: current.id });
         if (running) invoke('drop_status_endpoint', { port: current.rpcPort }).catch(() => undefined);
         await refreshService();
+        if (!running) {
+          setTimeout(() => void refreshService(), 800);
+        }
         addLog(`[${current.name}] 服务已${running ? '停止' : '启动'}网络`);
         return;
       }
