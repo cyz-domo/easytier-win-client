@@ -43,7 +43,7 @@ export function useInstances(
     setActiveId(id);
   }, []);
 
-  // 删除实例：释放后端资源，清空该实例会话流量，同步清除 Windows 服务中的残留实例
+  // 删除实例：释放后端资源，优雅停止运行中进程，清空该实例会话流量，同步清除 Windows 服务中的残留实例
   const removeInstance = useCallback(
     (id: string) => {
       if (instances.length <= 1) return;
@@ -54,6 +54,7 @@ export function useInstances(
         if (nextActive) setActiveId(nextActive.id);
       }
       if (target) {
+        invoke('stop_instance', { id }).catch(() => undefined);
         invoke('drop_status_endpoint', { port: target.rpcPort }).catch(() => undefined);
       }
       invoke('drop_instance_state', { id }).catch(() => undefined);

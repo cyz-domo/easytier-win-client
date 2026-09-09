@@ -141,15 +141,33 @@ export default function App() {
     if (toStart.length === 0) return;
     for (const inst of toStart) {
       attemptedAutoConnectIds.current.add(inst.id);
-      void (async () => {
+    }
+
+    void (async () => {
+      for (const inst of toStart) {
         try {
           addLog(`[${inst.name}] 检测到已开启自启动，正在自动连接网络…`);
           clearInstanceTraffic(inst.id);
-          const toml = encodeTOML(inst.config);
+
+          // 确保 TUN 网卡名称唯一，防止多实例并发抢占网卡
+          const otherDevNames = new Set(
+            instances
+              .filter(i => i.id !== inst.id)
+              .map(i => i.config.dev_name?.trim())
+              .filter(Boolean)
+          );
+          let effectiveConfig = { ...inst.config };
+          if (!effectiveConfig.dev_name?.trim() || otherDevNames.has(effectiveConfig.dev_name.trim())) {
+            const unique = `et_${inst.id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 6)}`;
+            effectiveConfig.dev_name = unique;
+            setInstances(xs => xs.map(i => (i.id === inst.id ? { ...i, config: { ...i.config, dev_name: unique } } : i)));
+          }
+
+          const toml = encodeTOML(effectiveConfig);
           await invoke('start_instance', {
             id: inst.id,
             config: toml,
-            rpcPortal: inst.remoteManageEnabled ? undefined : `127.0.0.1:${inst.rpcPort}`,
+            rpcPortal: `127.0.0.1:${inst.rpcPort}`,
             remoteManageEnabled: inst.remoteManageEnabled ?? false,
             rpcWhitelistCidrs: inst.rpcWhitelistCidrs ?? [],
           });
@@ -165,8 +183,8 @@ export default function App() {
         } catch (err) {
           addLog(`[${inst.name}] 自动连接异常: ${String(err)}`);
         }
-      })();
-    }
+      }
+    })();
   }, [instances, serviceChecking, serviceMode, addLog, showToast, clearInstanceTraffic, setInstances]);
 
   const currentRef = useRef(current);
@@ -518,7 +536,7 @@ export default function App() {
         await invoke('start_instance', {
           id: current.id,
           config: toml,
-          rpcPortal: current.remoteManageEnabled ? undefined : `127.0.0.1:${current.rpcPort}`,
+          rpcPortal: `127.0.0.1:${current.rpcPort}`,
           remoteManageEnabled: current.remoteManageEnabled ?? false,
           rpcWhitelistCidrs: current.rpcWhitelistCidrs ?? [],
         });

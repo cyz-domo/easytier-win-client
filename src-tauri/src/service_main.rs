@@ -272,14 +272,15 @@ mod windows_service {
                     runtime_manager::terminate_pid(*pid);
                     continue;
                 }
-                let config = configs.iter().find(|c| &c.id == id).unwrap();
-                if manager.portal_ready(config) {
-                    manager.adopt(config, *pid);
+                if let Some(config) = configs.iter().find(|c| &c.id == id) {
+                    if manager.portal_ready(config) {
+                        manager.adopt(config, *pid);
+                    }
                 }
             }
             for config in configs
                 .iter()
-                .filter(|c| c.desired_state == DesiredState::Running)
+                .filter(|c| c.auto_start || c.desired_state == DesiredState::Running)
             {
                 if manager.adopted.contains_key(&config.id) {
                     continue;
@@ -287,13 +288,13 @@ mod windows_service {
                 // Kill any leftover unhealthy orphan first: it holds the
                 // instance's ports and would make a clean restart impossible.
                 // An orphan also proves the network was running, so restore
-                // it even without auto_start; a clean boot only starts
-                // auto_start instances.
+                // it even without auto_start; a clean boot starts both
+                // auto_start instances and instances previously left running.
                 let orphan = orphans.iter().find(|(id, _)| id == &config.id);
                 if let Some((_, pid)) = orphan {
                     runtime_manager::terminate_pid(*pid);
                 }
-                if config.auto_start || orphan.is_some() {
+                if config.auto_start || orphan.is_some() || config.desired_state == DesiredState::Running {
                     if let Err(error) = manager.start(config) {
                         state
                             .lock()
@@ -302,9 +303,18 @@ mod windows_service {
                             .iter_mut()
                             .find(|c| c.id == config.id)
                             .map(|c| c.last_error = Some(error));
+                    } else {
+                        state
+                            .lock()
+                            .unwrap()
+                            .instances
+                            .iter_mut()
+                            .find(|c| c.id == config.id)
+                            .map(|c| c.desired_state = DesiredState::Running);
                     }
                 }
             }
+            let _ = config_store::save(&state_path, &state.lock().unwrap());
         }
         let tasks: Tasks = Arc::new(Mutex::new(HashMap::new()));
         let update_lock = Arc::new(Mutex::new(false));

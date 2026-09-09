@@ -176,7 +176,13 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
           <button className="ghost" onClick={() => void exportToml(true)}>
             <IconCopy size={13} /> 复制
           </button>
-          <button className="mini-button danger" onClick={() => removeInstance(current.id)}>
+          <button
+            className="mini-button danger"
+            onClick={async () => {
+              const ok = await appConfirm(`确定要删除网络实例「${current.name}」吗？\n\n该实例的本地配置将被移除，若网络正在运行将会自动断开。`);
+              if (ok) removeInstance(current.id);
+            }}
+          >
             <IconTrash size={12} /> 删除实例
           </button>
         </div>

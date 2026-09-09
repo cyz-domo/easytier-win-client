@@ -329,13 +329,15 @@ fn wait_for_exit(
     if let Some(child) = p.children.get_mut(&id) {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut child = p.children.remove(&id).unwrap();
-                let _ = child.wait();
+                if let Some(mut c) = p.children.remove(&id) {
+                    let _ = c.wait();
+                }
                 std::thread::sleep(std::time::Duration::from_millis(60));
                 let log_text = p
                     .logs
                     .get(&id)
-                    .map(|l| l.lock().unwrap().text())
+                    .and_then(|l| l.lock().ok())
+                    .map(|guard| guard.text())
                     .unwrap_or_default();
                 let filtered: Vec<&str> = log_text
                     .lines()
@@ -945,24 +947,28 @@ async fn install_service() -> Result<String, String> {
              pause\r\n";
         let _ = std::fs::write(dir.join("uninstall-service.bat"), uninstall_bat);
 
-        let bin_arg = format!("binPath= \"{}\" --interactive-user-sid={}", service_path, trusted_sid);
-
         if is_elevated() {
             // Already elevated: execute directly without UAC prompt or PowerShell nesting
             let _ = Command::new("sc.exe")
                 .args(["stop", "EasyTierService"])
                 .creation_flags(0x08000000)
                 .output();
-            let create_res = Command::new("sc.exe")
-                .args(["create", "EasyTierService", &bin_arg, "start=", "auto", "DisplayName=", "EasyTier Service"])
-                .creation_flags(0x08000000)
-                .output();
+            let sc_create_cmd = format!(
+                "create EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto DisplayName= \"EasyTier Service\"",
+                service_path, trusted_sid
+            );
+            let mut create_cmd = Command::new("sc.exe");
+            create_cmd.raw_arg(&sc_create_cmd).creation_flags(0x08000000);
+            let create_res = create_cmd.output();
             if let Ok(res) = create_res {
                 if !res.status.success() {
-                    let _ = Command::new("sc.exe")
-                        .args(["config", "EasyTierService", &bin_arg, "start=", "auto"])
-                        .creation_flags(0x08000000)
-                        .output();
+                    let sc_config_cmd = format!(
+                        "config EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto",
+                        service_path, trusted_sid
+                    );
+                    let mut config_cmd = Command::new("sc.exe");
+                    config_cmd.raw_arg(&sc_config_cmd).creation_flags(0x08000000);
+                    let _ = config_cmd.output();
                 }
             }
             let _ = Command::new("sc.exe")
@@ -1000,10 +1006,17 @@ async fn install_service() -> Result<String, String> {
                 .status();
         }
 
-        // Wait briefly and verify whether SCM reports the service as installed
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-        let query = service_query();
-        if query.installed {
+        // Adaptive polling: wait up to 12 seconds for UAC approval and SCM registration
+        let mut installed = false;
+        for _ in 0..12 {
+            let query = service_query();
+            if query.installed {
+                installed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        }
+        if installed {
             Ok("后台服务已安装并启动".into())
         } else {
             Err("服务安装未能生效。若在虚拟机中受权限限制，请以管理员身份右键运行程序目录下的 install-service.bat 手动安装".into())
