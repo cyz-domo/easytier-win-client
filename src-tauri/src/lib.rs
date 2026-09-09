@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod autostart;
 mod config_store;
 mod ipc;
 mod kernel_updater;
@@ -151,6 +152,16 @@ fn service_query() -> ServiceInstallation {
             message: Some("Windows 服务不可用".into()),
         }
     }
+}
+
+#[tauri::command]
+fn get_client_autostart() -> Result<autostart::AutoStartStatus, String> {
+    autostart::get_status()
+}
+
+#[tauri::command]
+fn set_client_autostart(enabled: bool, start_minimized: bool) -> Result<(), String> {
+    autostart::set_status(enabled, start_minimized)
 }
 
 #[tauri::command]
@@ -1452,6 +1463,17 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            let start_in_tray = std::env::args().any(|arg| arg == "--minimized" || arg == "--tray" || arg == "--silent");
+            if start_in_tray {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                    let _ = window.emit("app-window-visibility", false);
+                    #[cfg(windows)]
+                    trim_process_tree_working_set();
+                }
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1502,6 +1524,8 @@ pub fn run() {
             install_service,
             start_service,
             repair_service,
+            get_client_autostart,
+            set_client_autostart,
             #[cfg(feature = "remote-rpc")]
             remote_config_discover,
             #[cfg(feature = "remote-rpc")]

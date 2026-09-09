@@ -142,10 +142,30 @@ export default function App() {
   interface InstanceSnapshot { peers: PeerInfo[]; routes: RouteInfo[]; node: NodeStatus | null }
   const [statusByInstance, setStatusByInstance] = useState<Record<string, InstanceSnapshot>>({});
   // Cumulative per-peer traffic. The core's rx/tx counters are per-connection
-  // and reset when a peer reconnects, which silently erased transferred data;
-  // deltas accumulated here survive reconnects (and app restarts).
-  const [trafficTotals, setTrafficTotals] = useState<Record<string, { rx: number; tx: number }>>(() => load('easytier.traffic.v1', {}));
+  // Cumulative per-peer traffic for the current connection session.
+  // Resets when starting/stopping a network or restarting the client app,
+  // but survives transient peer disconnects and reconnects while active.
+  const [trafficTotals, setTrafficTotals] = useState<Record<string, { rx: number; tx: number }>>({});
   const lastPeerCounters = useRef<Record<string, { rx: number; tx: number }>>({});
+  const [clientAutoStart, setClientAutoStart] = useState<{ enabled: boolean; start_minimized: boolean }>({ enabled: false, start_minimized: false });
+  const autoConnectAttemptedRef = useRef(false);
+
+  useEffect(() => {
+    try { localStorage.removeItem('easytier.traffic.v1'); } catch {}
+    void invoke<{ enabled: boolean; start_minimized: boolean }>('get_client_autostart')
+      .then(s => setClientAutoStart(s))
+      .catch(() => {});
+  }, []);
+
+  const updateClientAutoStart = async (enabled: boolean, startMinimized: boolean) => {
+    try {
+      await invoke('set_client_autostart', { enabled, startMinimized });
+      setClientAutoStart({ enabled, start_minimized: startMinimized });
+      showToast(enabled ? '✓ 已开启开机自启动客户端' : '✓ 已关闭开机自启动客户端');
+    } catch (e) {
+      await appAlert(`设置开机自启失败：${String(e)}`);
+    }
+  };
   const [logsByInstance, setLogsByInstance] = useState<Record<string, string[]>>({});
   const [networkLogs, setNetworkLogs] = useState<string[]>([]);
   const [logView, setLogView] = useState<'runtime' | 'network'>('runtime');
@@ -217,7 +237,7 @@ export default function App() {
   const peers = curSnap.peers;
   const routes = curSnap.routes;
   const node = curSnap.node;
-  // Accumulated traffic (survives peer reconnects and app restarts).
+  // Accumulated traffic for current connection session (survives transient peer reconnects).
   const trafficPrefix = `${current?.id ?? ''}:`;
   const instanceTraffic = useMemo(() => {
     let rx = 0, tx = 0;
@@ -232,10 +252,11 @@ export default function App() {
       for (const [key, v] of Object.entries(m)) {
         if (!key.startsWith(trafficPrefix)) nextM[key] = v;
       }
-      localStorage.setItem('easytier.traffic.v1', JSON.stringify(nextM));
       return nextM;
     });
-    lastPeerCounters.current = {};
+    for (const key of Object.keys(lastPeerCounters.current)) {
+      if (key.startsWith(trafficPrefix)) delete lastPeerCounters.current[key];
+    }
   };
   const visiblePeers = useMemo(() => {
     if (showPeerNodes || !current) return peers;
@@ -724,7 +745,6 @@ export default function App() {
           for (const [k, v] of Object.entries(m)) {
             if (!k.startsWith(`${i.id}:`)) next[k] = v;
           }
-          localStorage.setItem('easytier.traffic.v1', JSON.stringify(next));
           return next;
         });
         for (const k of Object.keys(lastPeerCounters.current)) {
@@ -882,7 +902,6 @@ export default function App() {
             }
           }
           if (changed) {
-            try { localStorage.setItem('easytier.traffic.v1', JSON.stringify(nextM)); } catch {}
             return nextM;
           }
           return m;
@@ -908,6 +927,55 @@ export default function App() {
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, []);
+
+  // Auto-connect network instances on app startup when configured with autoStart in standalone mode.
+  // (In service mode, the Windows system service handles them independently on boot).
+  useEffect(() => {
+    if (autoConnectAttemptedRef.current || instances.length === 0 || serviceChecking) return;
+    autoConnectAttemptedRef.current = true;
+    if (!serviceMode) {
+      const toStart = instances.filter(i => i.autoStart && i.status !== 'running');
+      if (toStart.length > 0) {
+        for (const inst of toStart) {
+          void (async () => {
+            try {
+              addLog(`[${inst.name}] 检测到已开启自启动，正在自动连接网络…`);
+              const prefix = `${inst.id}:`;
+              setTrafficTotals(m => {
+                const next: Record<string, { rx: number; tx: number }> = {};
+                for (const [k, v] of Object.entries(m)) {
+                  if (!k.startsWith(prefix)) next[k] = v;
+                }
+                return next;
+              });
+              for (const k of Object.keys(lastPeerCounters.current)) {
+                if (k.startsWith(prefix)) delete lastPeerCounters.current[k];
+              }
+              const toml = encodeTOML(inst.config);
+              await invoke('start_instance', {
+                id: inst.id,
+                config: toml,
+                rpcPortal: inst.remoteManageEnabled ? undefined : `127.0.0.1:${inst.rpcPort}`,
+                remoteManageEnabled: inst.remoteManageEnabled ?? false,
+                rpcWhitelistCidrs: inst.rpcWhitelistCidrs ?? [],
+              });
+              await new Promise(r => setTimeout(r, 1200));
+              const s = await invoke<{ status: Status; error?: string }>('wait_for_exit', { id: inst.id });
+              if (s.status === 'failed') {
+                addLog(`[${inst.name}] 自动启动失败: ${s.error || 'core 启动异常'}`);
+              } else {
+                setInstances(xs => xs.map(i => (i.id === inst.id ? { ...i, status: 'running' } : i)));
+                addLog(`[${inst.name}] 网络已自动启动运行`);
+                showToast(`✓ 已自动连接网络: ${inst.name}`);
+              }
+            } catch (err) {
+              addLog(`[${inst.name}] 自动连接异常: ${String(err)}`);
+            }
+          })();
+        }
+      }
+    }
+  }, [instances, serviceChecking, serviceMode]);
 
   // Append runtime messages to the log pane.
   const addLog = (line: string) => setLogsByInstance(m => {
@@ -1059,6 +1127,19 @@ export default function App() {
         setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, config: { ...i.config, dev_name: unique } } : i)));
         current.config.dev_name = unique;
         addLog(`[${current.name}] TUN 虚拟网卡名已自动设为独立设备名 ${unique}`);
+      }
+    }
+    if (!running) {
+      const prefix = `${current.id}:`;
+      setTrafficTotals(m => {
+        const next: Record<string, { rx: number; tx: number }> = {};
+        for (const [k, v] of Object.entries(m)) {
+          if (!k.startsWith(prefix)) next[k] = v;
+        }
+        return next;
+      });
+      for (const k of Object.keys(lastPeerCounters.current)) {
+        if (k.startsWith(prefix)) delete lastPeerCounters.current[k];
       }
     }
     setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, status: running ? 'stopping' : 'starting' } : i)));
@@ -1502,7 +1583,7 @@ export default function App() {
             <div className="metrics">
               <article><span>组网成员</span><strong>{running ? peers.length : '—'}</strong><small>{running ? '在线节点' : '未运行'}</small></article>
               <article><span>路由条目</span><strong>{running ? routes.length : '—'}</strong><small>{running ? '已知网段' : '未运行'}</small></article>
-              <article><span>累计收发<button type="button" className="mini-button" style={{ marginLeft: 8, padding: '2px 8px', fontSize: 10 }} onClick={clearTraffic} title="清零累计统计">清零</button></span><strong>{running ? formatBytes(instanceTraffic.rx + instanceTraffic.tx) : '—'}</strong><small>累计值（重连不丢失）</small></article>
+              <article><span>本次累计<button type="button" className="mini-button" style={{ marginLeft: 8, padding: '2px 8px', fontSize: 10 }} onClick={clearTraffic} title="清零当前累计统计">清零</button></span><strong>{running ? formatBytes(instanceTraffic.rx + instanceTraffic.tx) : '—'}</strong><small>会话累计（重连不丢失）</small></article>
             </div>
 
             {running && (
@@ -1909,6 +1990,46 @@ export default function App() {
               {kernelUpdate?.phase === 'completed' && <p className="hint">内核切换/更新完成，原来运行中的网络已尝试自动恢复。</p>}
             </div>
             <div className="card">
+              <h3 className="card-title">系统自启动</h3>
+              <p className="hint">配置 EasyTier 客户端随 Windows 开机启动，实现桌面登录后即刻在后台就绪。</p>
+              <table className="kv-table">
+                <tbody>
+                  <tr>
+                    <th>开机自启客户端</th>
+                    <td className="inline">
+                      <button
+                        className={clientAutoStart.enabled ? 'switch on' : 'switch'}
+                        role="switch"
+                        aria-checked={clientAutoStart.enabled}
+                        title="随 Windows 开机自启动客户端"
+                        onClick={() => void updateClientAutoStart(!clientAutoStart.enabled, clientAutoStart.start_minimized)}
+                      >
+                        <span className="knob" />
+                      </button>
+                      <span className="hint-inline">{clientAutoStart.enabled ? '已开启' : '已关闭'}</span>
+                    </td>
+                  </tr>
+                  {clientAutoStart.enabled && (
+                    <tr>
+                      <th>静默启动至托盘</th>
+                      <td className="inline">
+                        <button
+                          className={clientAutoStart.start_minimized ? 'switch on' : 'switch'}
+                          role="switch"
+                          aria-checked={clientAutoStart.start_minimized}
+                          title="开机自启后静默最小化到系统托盘，不弹出主窗口"
+                          onClick={() => void updateClientAutoStart(true, !clientAutoStart.start_minimized)}
+                        >
+                          <span className="knob" />
+                        </button>
+                        <span className="hint-inline">{clientAutoStart.start_minimized ? '仅托盘运行（静默）' : '显示主界面'}</span>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="card">
               <p className="hint">每个实例使用独立 RPC 端口，避免多实例冲突。启动网络后可通过 easytier-cli 连接该端口查询状态。</p>
               <table className="kv-table">
                 <tbody>
@@ -1919,11 +2040,13 @@ export default function App() {
                         <input className="field-input narrow" type="number" value={i.rpcPort} min={1024} max={65535}
                           onChange={e => setInstances(xs => xs.map(x => (x.id === i.id ? { ...x, rpcPort: parseInt(e.target.value, 10) || x.rpcPort } : x)))} />
                         <span className="hint-inline">{i.status === 'running' ? '运行中' : '已停止'}</span>
-                        <button className={i.autoStart ? 'switch on' : 'switch'} role="switch" aria-checked={i.autoStart ?? false} title="开机自动启动" onClick={async () => {
-                          const next = !(i.autoStart ?? false);
-                          if (serviceMode) { try { await serviceRequest('set_auto_start', { instance_id: i.id, auto_start: next }); } catch (e) { await appAlert(`更新自动启动失败：${String(e)}`); return; } }
-                          setInstances(xs => xs.map(x => x.id === i.id ? { ...x, autoStart: next } : x));
-                        }}><span className="knob" /></button><span className="hint-inline">自动启动</span>
+                        <button className={i.autoStart ? 'switch on' : 'switch'} role="switch" aria-checked={i.autoStart ?? false}
+                          title="程序启动后自动连接本网络（若已安装后台服务，开机免登录静默连接）"
+                          onClick={async () => {
+                            const next = !(i.autoStart ?? false);
+                            if (serviceMode) { try { await serviceRequest('set_auto_start', { instance_id: i.id, auto_start: next }); } catch (e) { await appAlert(`更新自动启动失败：${String(e)}`); return; } }
+                            setInstances(xs => xs.map(x => x.id === i.id ? { ...x, autoStart: next } : x));
+                          }}><span className="knob" /></button><span className="hint-inline" title="程序启动后自动连接本网络（服务模式下开机免登录自启）">自动启动</span>
                         <button className={i.remoteManageEnabled ? 'switch on' : 'switch'} role="switch" aria-checked={i.remoteManageEnabled ?? false}
                           title="允许虚拟网内其他设备修改本实例配置（RPC 监听 0.0.0.0）"
                           onClick={() => setInstances(xs => xs.map(x => (x.id === i.id ? { ...x, remoteManageEnabled: !(x.remoteManageEnabled ?? false) } : x)))}
