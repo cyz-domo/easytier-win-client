@@ -1359,6 +1359,72 @@ button.stop {
   border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
+.log-level-debug {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.log-level-filters {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--surface-hover);
+  padding: 2px 4px;
+  border-radius: var(--pill);
+  border: 1px solid var(--glass-border-subtle);
+}
+
+.log-level-pill {
+  background: none;
+  border: 1px solid transparent;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-3);
+  border-radius: var(--pill);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all var(--ease);
+  user-select: none;
+}
+
+.log-level-pill:hover {
+  color: var(--ink);
+  background: var(--glass-border-subtle);
+}
+
+.log-level-pill.active {
+  background: var(--surface-card);
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
+.log-level-pill.has-errors {
+  color: var(--danger);
+}
+
+.log-level-pill.active.has-errors {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--danger);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.log-level-pill .pill-count {
+  font-size: 10px;
+  opacity: 0.85;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 0 5px;
+  border-radius: 8px;
+}
+
+[data-theme='dark'] .log-level-pill .pill-count {
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .log-text-success {
   color: #4ade80;
 }
@@ -2280,11 +2346,31 @@ button.stop {
   box-shadow: 0 4px 10px var(--accent-glow);
 }
 
-.btn-select-node.current {
+.btn-select-node.current,
+.btn-select-node.added {
   background: rgba(34, 197, 94, 0.14);
   color: #16a34a;
   border-color: rgba(34, 197, 94, 0.3);
-  cursor: default;
+  cursor: pointer;
+}
+
+.btn-select-node.added:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #dc2626;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+[data-theme='dark'] .btn-select-node.current,
+[data-theme='dark'] .btn-select-node.added {
+  background: rgba(34, 197, 94, 0.22);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.4);
+}
+
+[data-theme='dark'] .btn-select-node.added:hover {
+  background: rgba(239, 68, 68, 0.22);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.4);
 }
 
 .btn-select-node.disabled {
@@ -2300,6 +2386,11 @@ button.stop {
   border-top: 1px solid var(--glass-border-subtle);
   color: var(--ink-3);
   font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .icon-spin {

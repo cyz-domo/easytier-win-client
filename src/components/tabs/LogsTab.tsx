@@ -22,6 +22,28 @@ function normalizeNetworkLogs(value: unknown): string[] {
     .filter(Boolean);
 }
 
+export type LogLevel = 'ALL' | 'INFO' | 'WARN' | 'ERROR' | 'DEBUG';
+
+function extractLogLevel(line: string): LogLevel | 'UNKNOWN' {
+  const isoMatch = line.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?\s+([A-Z]+)\s+/);
+  if (isoMatch) {
+    const lvl = isoMatch[1].toUpperCase();
+    if (lvl === 'INFO' || lvl === 'WARN' || lvl === 'ERROR' || lvl === 'DEBUG') {
+      return lvl as LogLevel;
+    }
+    if (lvl === 'TRACE') return 'DEBUG';
+    return 'UNKNOWN';
+  }
+  const lower = line.toLowerCase();
+  if (lower.includes('error') || lower.includes('fail') || lower.includes('panic') || line.includes('TunnelError')) {
+    return 'ERROR';
+  }
+  if (lower.includes('warn')) {
+    return 'WARN';
+  }
+  return 'UNKNOWN';
+}
+
 function formatLogLine(line: string, view: 'runtime' | 'network'): React.ReactNode {
   if (view === 'runtime') {
     // 运行日志典型格式: "[17:15:20] [fn2] text..." 或 "[17:15:20] text..."
@@ -47,7 +69,13 @@ function formatLogLine(line: string, view: 'runtime' | 'network'): React.ReactNo
     if (isoMatch) {
       const [, , timeOnly, level, rest] = isoMatch;
       const levelClass =
-        level === 'ERROR' ? 'log-level-error' : level === 'WARN' ? 'log-level-warn' : 'log-level-info';
+        level === 'ERROR'
+          ? 'log-level-error'
+          : level === 'WARN'
+          ? 'log-level-warn'
+          : level === 'DEBUG' || level === 'TRACE'
+          ? 'log-level-debug'
+          : 'log-level-info';
       return (
         <span className="log-line-content">
           <span className="log-time">[{timeOnly}]</span>
@@ -65,6 +93,11 @@ function formatLogLine(line: string, view: 'runtime' | 'network'): React.ReactNo
   return <span className="log-line-content">{line}</span>;
 }
 
+interface LogItem {
+  line: string;
+  originalIndex: number;
+}
+
 export const LogsTab: React.FC<LogsTabProps> = ({
   current,
   logsByInstance,
@@ -75,6 +108,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({
 }) => {
   const [logView, setLogView] = useState<'runtime' | 'network'>('runtime');
   const [networkLogs, setNetworkLogs] = useState<string[]>([]);
+  const [levelFilter, setLevelFilter] = useState<LogLevel>('ALL');
   const logTimer = useRef<number | null>(null);
 
   const clearNetworkLogs = () => setNetworkLogs([]);
@@ -106,19 +140,78 @@ export const LogsTab: React.FC<LogsTabProps> = ({
     };
   }, [current?.id, current?.status, serviceMode, refreshSecs, isWindowVisible]);
 
-  const activeLogs = logView === 'runtime' ? logsByInstance[current.id] ?? [] : networkLogs;
+  const levelCounts = React.useMemo(() => {
+    const counts: Record<LogLevel, number> = { ALL: networkLogs.length, INFO: 0, WARN: 0, ERROR: 0, DEBUG: 0 };
+    for (const line of networkLogs) {
+      const lvl = extractLogLevel(line);
+      if (lvl !== 'UNKNOWN' && lvl !== 'ALL') {
+        counts[lvl]++;
+      }
+    }
+    return counts;
+  }, [networkLogs]);
+
+  const activeLogItems = React.useMemo<LogItem[]>(() => {
+    if (logView === 'runtime') {
+      const list = logsByInstance[current.id] ?? [];
+      return list.map((line, idx) => ({ line, originalIndex: idx }));
+    }
+
+    const indexed: LogItem[] = networkLogs.map((line, idx) => ({ line, originalIndex: idx }));
+    if (levelFilter === 'ALL') return indexed;
+
+    const result: LogItem[] = [];
+    let prevMatched = false;
+    for (const item of indexed) {
+      const lvl = extractLogLevel(item.line);
+      if (lvl === levelFilter) {
+        result.push(item);
+        prevMatched = true;
+      } else if (lvl === 'UNKNOWN' && prevMatched && levelFilter === 'ERROR') {
+        result.push(item);
+      } else {
+        prevMatched = false;
+      }
+    }
+    return result;
+  }, [logView, current.id, logsByInstance, networkLogs, levelFilter]);
 
   return (
     <div className="card">
-      <div className="card-title-row">
-        <div className="segmented" role="tablist" aria-label="日志类型">
-          <button className={logView === 'runtime' ? 'seg active' : 'seg'} onClick={() => setLogView('runtime')}>
-            运行日志
-          </button>
-          <button className={logView === 'network' ? 'seg active' : 'seg'} onClick={() => setLogView('network')}>
-            组网日志
-          </button>
+      <div className="card-title-row" style={{ flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <div className="segmented" role="tablist" aria-label="日志类型">
+            <button className={logView === 'runtime' ? 'seg active' : 'seg'} onClick={() => setLogView('runtime')}>
+              运行日志
+            </button>
+            <button className={logView === 'network' ? 'seg active' : 'seg'} onClick={() => setLogView('network')}>
+              组网日志
+            </button>
+          </div>
+
+          {logView === 'network' && (
+            <div className="log-level-filters" role="group" aria-label="日志级别过滤">
+              {(['ALL', 'INFO', 'WARN', 'ERROR', 'DEBUG'] as const).map(lvl => {
+                const count = levelCounts[lvl];
+                const label = lvl === 'ALL' ? '全部' : lvl;
+                const isErr = lvl === 'ERROR' && count > 0;
+                return (
+                  <button
+                    key={lvl}
+                    type="button"
+                    className={`log-level-pill ${levelFilter === lvl ? 'active' : ''} ${isErr ? 'has-errors' : ''}`}
+                    onClick={() => setLevelFilter(lvl)}
+                    title={`过滤 ${label} 级别的组网日志`}
+                  >
+                    <span>{label}</span>
+                    {count > 0 && <span className="pill-count">{count}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
+
         <button
           className="ghost"
           onClick={() =>
@@ -136,13 +229,15 @@ export const LogsTab: React.FC<LogsTabProps> = ({
           if (el && logTimer.current == null) el.scrollTop = el.scrollHeight;
         }}
       >
-        {activeLogs.length === 0 ? (
-          <p className="list-empty">暂无{logView === 'runtime' ? '运行' : '组网'}日志</p>
+        {activeLogItems.length === 0 ? (
+          <p className="list-empty">
+            暂无{logView === 'runtime' ? '运行' : levelFilter === 'ALL' ? '组网' : `${levelFilter} 级别组网`}日志
+          </p>
         ) : (
-          activeLogs.map((l, i) => (
-            <div className="log-line" key={i}>
-              <span className="log-line-num">{i + 1}</span>
-              {formatLogLine(l, logView)}
+          activeLogItems.map(item => (
+            <div className="log-line" key={item.originalIndex}>
+              <span className="log-line-num">{item.originalIndex + 1}</span>
+              {formatLogLine(item.line, logView)}
             </div>
           ))
         )}

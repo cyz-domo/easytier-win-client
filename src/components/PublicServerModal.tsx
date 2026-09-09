@@ -25,13 +25,17 @@ export interface PublicNodesResponse {
 interface PublicServerModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSelect: (address: string) => void;
+  selectedAddresses?: string[];
+  onToggle?: (address: string) => void;
   currentAddress?: string;
+  onSelect?: (address: string) => void;
 }
 
 export const PublicServerModal: React.FC<PublicServerModalProps> = ({
   isOpen,
   onClose,
+  selectedAddresses = [],
+  onToggle,
   onSelect,
   currentAddress,
 }) => {
@@ -128,6 +132,22 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
     });
   }, [nodes, activeTab]);
 
+  const isNodeSelected = useCallback(
+    (addr: string) => {
+      const clean = addr.trim().toLowerCase();
+      if (selectedAddresses.length > 0) {
+        return selectedAddresses.some(a => a.trim().toLowerCase() === clean);
+      }
+      if (currentAddress) {
+        return currentAddress.trim().toLowerCase() === clean;
+      }
+      return false;
+    },
+    [selectedAddresses, currentAddress]
+  );
+
+  const selectedCount = selectedAddresses.length;
+
   if (!isOpen) return null;
 
   return (
@@ -152,7 +172,7 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
                 EasyTier 公共节点选择器
               </h3>
               <small style={{ color: 'var(--ink-3)', fontSize: 11 }}>
-                实时状态与双向测速 · 支持本机 TCP 直连握手与社区监控探针
+                实时状态与双向测速 · 支持多选添加至对等节点列表{selectedCount > 0 ? ` (已添加 ${selectedCount} 个)` : ''}
               </small>
             </div>
           </div>
@@ -249,14 +269,14 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
             <div className="public-node-empty">该分类下暂无可用节点</div>
           ) : (
             filteredNodes.map(node => {
-              const isCurrent = currentAddress?.trim() === node.address.trim();
+              const isSelected = isNodeSelected(node.address);
               const proto = node.address.split('://')[0]?.toUpperCase() || 'TCP';
 
               return (
                 <div
                   key={`${node.id}-${node.address}`}
                   className={`public-node-card ${node.is_masked ? 'masked' : ''} ${
-                    isCurrent ? 'selected' : ''
+                    isSelected ? 'selected' : ''
                   }`}
                 >
                   <div className="node-info-col">
@@ -345,13 +365,18 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
                     ) : (
                       <button
                         type="button"
-                        className={`btn-select-node ${isCurrent ? 'current' : 'primary-action'}`}
+                        className={`btn-select-node ${isSelected ? 'added' : 'primary-action'}`}
                         onClick={() => {
-                          onSelect(node.address);
-                          onClose();
+                          if (onToggle) {
+                            onToggle(node.address);
+                          } else if (onSelect) {
+                            onSelect(node.address);
+                            onClose();
+                          }
                         }}
+                        title={isSelected ? '已在当前节点列表中，点击移除' : '点击添加至节点列表（可多选）'}
                       >
-                        {isCurrent ? '已选' : '选择'}
+                        {isSelected ? '✓ 已添加' : '＋ 添加'}
                       </button>
                     )}
                   </div>
@@ -361,11 +386,29 @@ export const PublicServerModal: React.FC<PublicServerModalProps> = ({
           )}
         </div>
 
-        {/* Footer info notice */}
+        {/* Footer info notice & action */}
         <div className="public-server-footer">
-          <small>
+          <small style={{ flex: 1, minWidth: 240 }}>
             💡 提示：带 <span style={{ color: 'var(--ink)' }}>*</span> 的节点地址已打码，完整地址可在 EasyTier 官方 QQ 群获取（一群: 949700262，二群: 837676408，三群: 957189589）。
           </small>
+          <button
+            type="button"
+            className="mini-button"
+            style={{
+              padding: '6px 18px',
+              fontSize: 12,
+              fontWeight: 600,
+              background: 'var(--accent)',
+              color: '#ffffff',
+              border: 'none',
+              borderRadius: 'var(--radius-sm)',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+            onClick={onClose}
+          >
+            完成选择 {selectedCount > 0 ? `(${selectedCount})` : ''}
+          </button>
         </div>
       </div>
     </div>

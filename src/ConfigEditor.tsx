@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { NetworkConfig, NetworkingMethod, PortForwardConfig } from './network-config';
 import { PublicServerModal } from './components/PublicServerModal';
 import { IconGlobe } from './icons';
@@ -99,10 +99,22 @@ export interface EditorProps {
 }
 
 export function ConfigEditor({ config: c, onChange, showAdvanced, onToggleAdvanced }: EditorProps) {
-  const method = c.networking_method;
+  const method = c.networking_method === 0 ? 1 : c.networking_method;
   const setMethod = (m: NetworkingMethod) => onChange({ networking_method: m });
   const [showPublicModal, setShowPublicModal] = useState(false);
-  const [modalTarget, setModalTarget] = useState<'public' | 'peer'>('public');
+
+  // Migrate legacy public_server_url into peer_urls automatically
+  useEffect(() => {
+    if (c.public_server_url && c.public_server_url.trim()) {
+      const legacy = c.public_server_url.trim();
+      const exists = c.peer_urls.some(p => p.trim().toLowerCase() === legacy.toLowerCase());
+      onChange({
+        public_server_url: '',
+        networking_method: 1,
+        peer_urls: exists ? c.peer_urls : [legacy, ...c.peer_urls.filter(Boolean)],
+      });
+    }
+  }, [c.public_server_url, c.peer_urls, onChange]);
 
   const updateForward = (id: string, patch: Partial<PortForwardConfig>) =>
     onChange({ port_forwards: c.port_forwards.map(f => (f.id === id ? { ...f, ...patch } : f)) });
@@ -118,48 +130,25 @@ export function ConfigEditor({ config: c, onChange, showAdvanced, onToggleAdvanc
           <div className="field">
             <span className="field-label">组网方式</span>
             <div className="segmented">
-              {([['公共服务器', 0], ['手动', 1], ['独立', 2]] as [string, NetworkingMethod][]).map(([label, m]) => (
+              {([['指定节点', 1], ['独立网络', 2]] as [string, NetworkingMethod][]).map(([label, m]) => (
                 <button key={m} type="button" className={method === m ? 'seg active' : 'seg'} onClick={() => setMethod(m)}>{label}</button>
               ))}
             </div>
           </div>
         </div>
-        {method === 0 && (
-          <div className="field">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-              <span className="field-label" style={{ margin: 0 }}>公共服务器地址</span>
-              <button
-                type="button"
-                className="mini-button"
-                style={{ fontSize: 11, padding: '3px 10px', display: 'inline-flex', alignItems: 'center', gap: 5 }}
-                onClick={() => {
-                  setModalTarget('public');
-                  setShowPublicModal(true);
-                }}
-              >
-                <IconGlobe size={13} />
-                <span>选择公共节点 / 状态列表</span>
-              </button>
-            </div>
-            <input
-              className="field-input"
-              value={c.public_server_url}
-              onChange={e => onChange({ public_server_url: e.target.value })}
-              placeholder="tcp://public.easytier.top:11010"
-            />
-          </div>
-        )}
         {method === 1 && (
           <StringListEditor
-            title="初始节点（Peer URL）"
+            title="对等节点 / 公共服务器（Peer URL）"
             values={c.peer_urls}
             onChange={v => onChange({ peer_urls: v })}
-            placeholder="tcp://192.168.1.10:11010"
-            onOpenPublicModal={() => {
-              setModalTarget('peer');
-              setShowPublicModal(true);
-            }}
+            placeholder="tcp://192.168.1.10:11010 或从公共节点库选择"
+            onOpenPublicModal={() => setShowPublicModal(true)}
           />
+        )}
+        {method === 2 && (
+          <div className="field-hint" style={{ marginTop: 6, marginBottom: 12, padding: '8px 12px', background: 'var(--surface-hover)', borderRadius: 'var(--radius-sm)', fontSize: 12 }}>
+            💡 独立网络模式：本机仅作为根节点/监听节点，无需主动连接外部节点，其他节点可通过指定本机的监听地址加入网络。
+          </div>
         )}
         <div className="grid-2">
           <label className="field">
@@ -278,14 +267,18 @@ export function ConfigEditor({ config: c, onChange, showAdvanced, onToggleAdvanc
       <PublicServerModal
         isOpen={showPublicModal}
         onClose={() => setShowPublicModal(false)}
-        currentAddress={modalTarget === 'public' ? c.public_server_url : undefined}
-        onSelect={addr => {
-          if (modalTarget === 'public') {
-            onChange({ public_server_url: addr });
+        selectedAddresses={c.peer_urls}
+        onToggle={addr => {
+          const clean = addr.trim();
+          const exists = c.peer_urls.some(p => p.trim().toLowerCase() === clean.toLowerCase());
+          if (exists) {
+            onChange({
+              peer_urls: c.peer_urls.filter(p => p.trim().toLowerCase() !== clean.toLowerCase()),
+            });
           } else {
-            if (!c.peer_urls.includes(addr)) {
-              onChange({ peer_urls: [...c.peer_urls.filter(Boolean), addr] });
-            }
+            onChange({
+              peer_urls: [...c.peer_urls.filter(Boolean), clean],
+            });
           }
         }}
       />

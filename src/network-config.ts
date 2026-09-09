@@ -173,9 +173,6 @@ export function validateConfig(config: NetworkConfig): ValidationError[] {
       errors.push({ field: 'network_length', message: '子网前缀长度必须在 1-32 之间' });
     }
   }
-  if (config.networking_method === 0 && !config.public_server_url.trim()) {
-    errors.push({ field: 'public_server_url', message: '公共服务器模式下必须填写服务器地址' });
-  }
   if (config.enable_vpn_portal) {
     if (!config.vpn_portal_client_network_addr.trim()) {
       errors.push({ field: 'vpn_portal_client_network_addr', message: 'VPN 门户客户端网段地址不能为空' });
