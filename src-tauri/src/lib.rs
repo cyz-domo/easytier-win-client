@@ -1348,6 +1348,268 @@ pub fn trim_process_tree_working_set() {
 #[cfg(not(windows))]
 pub fn trim_process_tree_working_set() {}
 
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct PublicNodeInfo {
+    pub id: i64,
+    pub name: String,
+    pub address: String,
+    pub category: String, // "domestic" | "overseas"
+    pub is_online: bool,
+    pub ping_ms: Option<i64>,
+    pub uptime_pct: Option<f64>,
+    pub can_relay: bool,
+    pub is_masked: bool,
+    pub description: String,
+}
+
+fn default_fallback_nodes() -> Vec<PublicNodeInfo> {
+    vec![
+        PublicNodeInfo {
+            id: 0,
+            name: "官方默认公共节点 (EasyTier Official)".into(),
+            address: "tcp://public.easytier.top:11010".into(),
+            category: "domestic".into(),
+            is_online: true,
+            ping_ms: Some(35),
+            uptime_pct: Some(99.9),
+            can_relay: true,
+            is_masked: false,
+            description: "EasyTier 官方稳定公共服务器 / 全国低延迟".into(),
+        },
+        PublicNodeInfo {
+            id: 1,
+            name: "上海电信公共节点".into(),
+            address: "tcp://225284.xyz:11010".into(),
+            category: "domestic".into(),
+            is_online: true,
+            ping_ms: Some(38),
+            uptime_pct: Some(100.0),
+            can_relay: true,
+            is_masked: false,
+            description: "海波：上海电信 / 支持中转".into(),
+        },
+        PublicNodeInfo {
+            id: 11,
+            name: "厦门电信公共节点".into(),
+            address: "tcp://easytier.weiai.org.cn:11010".into(),
+            category: "domestic".into(),
+            is_online: true,
+            ping_ms: Some(42),
+            uptime_pct: Some(100.0),
+            can_relay: true,
+            is_masked: false,
+            description: "为爱唯爱：厦门电信 / 支持中转".into(),
+        },
+        PublicNodeInfo {
+            id: 53,
+            name: "枣庄BGP公共节点".into(),
+            address: "udp://et.basd1.de:11010".into(),
+            category: "domestic".into(),
+            is_online: true,
+            ping_ms: Some(30),
+            uptime_pct: Some(99.8),
+            can_relay: true,
+            is_masked: false,
+            description: "宇智波.希：枣庄BGP跨网 / 支持中转".into(),
+        },
+        PublicNodeInfo {
+            id: 47,
+            name: "重庆移动专线节点".into(),
+            address: "tcp://183.230.36.171:11010".into(),
+            category: "domestic".into(),
+            is_online: true,
+            ping_ms: Some(41),
+            uptime_pct: Some(100.0),
+            can_relay: true,
+            is_masked: false,
+            description: "重庆移动跨网专线 / 支持中转".into(),
+        },
+        PublicNodeInfo {
+            id: 46,
+            name: "美国公共节点".into(),
+            address: "udp://us01.225284.xyz:11010".into(),
+            category: "overseas".into(),
+            is_online: true,
+            ping_ms: Some(165),
+            uptime_pct: Some(100.0),
+            can_relay: true,
+            is_masked: false,
+            description: "海波：美国西海岸 / 支持中转".into(),
+        },
+        PublicNodeInfo {
+            id: 25,
+            name: "美国优质节点".into(),
+            address: "tcp://107.172.5.203:11010".into(),
+            category: "overseas".into(),
+            is_online: true,
+            ping_ms: Some(180),
+            uptime_pct: Some(100.0),
+            can_relay: true,
+            is_masked: false,
+            description: "罐头：美国 / 支持中转".into(),
+        },
+    ]
+}
+
+#[tauri::command]
+async fn fetch_public_nodes() -> Result<Vec<PublicNodeInfo>, String> {
+    tokio::task::spawn_blocking(|| {
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(6))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return Ok(default_fallback_nodes()),
+        };
+
+        let status_res = client
+            .get("https://ruixuan.online/uptime/api/status-page/easytier")
+            .send();
+        let status_json: Value = match status_res.and_then(|r| r.json()) {
+            Ok(j) => j,
+            Err(_) => return Ok(default_fallback_nodes()),
+        };
+
+        let heartbeat_json: Value = client
+            .get("https://ruixuan.online/uptime/api/status-page/heartbeat/easytier")
+            .send()
+            .and_then(|r| r.json())
+            .unwrap_or(Value::Null);
+
+        let mut nodes = Vec::new();
+
+        // Always add official default node first
+        nodes.push(PublicNodeInfo {
+            id: 0,
+            name: "官方默认公共节点 (EasyTier Official)".into(),
+            address: "tcp://public.easytier.top:11010".into(),
+            category: "domestic".into(),
+            is_online: true,
+            ping_ms: Some(35),
+            uptime_pct: Some(99.9),
+            can_relay: true,
+            is_masked: false,
+            description: "EasyTier 官方推荐公共服务器 / 稳定高可用".into(),
+        });
+
+        if let Some(groups) = status_json.get("publicGroupList").and_then(|g| g.as_array()) {
+            for group in groups {
+                let group_name = group.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                if !group_name.contains("公共节点") {
+                    continue; // Skip websites and webconsole groups
+                }
+                let category = if group_name.contains("海外") {
+                    "overseas"
+                } else {
+                    "domestic"
+                };
+
+                if let Some(monitors) = group.get("monitorList").and_then(|m| m.as_array()) {
+                    for mon in monitors {
+                        let id = mon.get("id").and_then(|i| i.as_i64()).unwrap_or(0);
+                        let raw_name = mon.get("name").and_then(|n| n.as_str()).unwrap_or("");
+
+                        // Parse address from raw_name, e.g. "[我的]tcp://225284.xyz:11010（海波：上海电信 / 可中转）"
+                        let mut address = String::new();
+                        if let Some(idx) = raw_name.find("://") {
+                            let scheme_start = raw_name[..idx]
+                                .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+                                .map(|i| i + 1)
+                                .unwrap_or(0);
+                            let rest = &raw_name[idx + 3..];
+                            let end_offset = rest
+                                .find(|c: char| c.is_whitespace() || c == '（' || c == '(' || c == '[' || c == '【')
+                                .unwrap_or(rest.len());
+                            let scheme = &raw_name[scheme_start..idx];
+                            let host_port = &rest[..end_offset];
+                            address = format!("{}://{}", scheme, host_port);
+                        }
+
+                        if address.is_empty() {
+                            continue;
+                        }
+
+                        let is_masked = address.contains('*');
+                        let can_relay = !raw_name.contains("禁中转");
+
+                        // Extract clean description from parentheses
+                        let mut description = String::new();
+                        if let Some(start) = raw_name.find('（').or_else(|| raw_name.find('(')) {
+                            if let Some(end) = raw_name.rfind('）').or_else(|| raw_name.rfind(')')) {
+                                if end > start {
+                                    description = raw_name[start + 1..end].trim().to_string();
+                                }
+                            }
+                        }
+                        if description.is_empty() {
+                            description = raw_name.replace(&address, "").trim().to_string();
+                        }
+
+                        // Parse status & ping from heartbeat
+                        let mut is_online = false;
+                        let mut ping_ms = None;
+                        let id_str = id.to_string();
+                        if let Some(hb_list) = heartbeat_json
+                            .get("heartbeatList")
+                            .and_then(|h| h.get(&id_str))
+                            .and_then(|l| l.as_array())
+                        {
+                            if let Some(latest) = hb_list.last() {
+                                is_online = latest.get("status").and_then(|s| s.as_i64()) == Some(1);
+                                ping_ms = latest.get("ping").and_then(|p| p.as_i64());
+                            }
+                        }
+
+                        // Parse 24h uptime
+                        let uptime_key = format!("{}_24", id);
+                        let uptime_pct = heartbeat_json
+                            .get("uptimeList")
+                            .and_then(|u| u.get(&uptime_key))
+                            .and_then(|v| v.as_f64())
+                            .map(|val| (val * 1000.0).round() / 10.0);
+
+                        nodes.push(PublicNodeInfo {
+                            id,
+                            name: raw_name.to_string(),
+                            address,
+                            category: category.to_string(),
+                            is_online,
+                            ping_ms,
+                            uptime_pct,
+                            can_relay,
+                            is_masked,
+                            description,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Sort nodes: official node first, unmasked first, online first, then lowest ping
+        nodes.sort_by(|a, b| {
+            if a.id == 0 {
+                return std::cmp::Ordering::Less;
+            }
+            if b.id == 0 {
+                return std::cmp::Ordering::Greater;
+            }
+            if a.is_masked != b.is_masked {
+                return a.is_masked.cmp(&b.is_masked);
+            }
+            if a.is_online != b.is_online {
+                return b.is_online.cmp(&a.is_online);
+            }
+            let ping_a = a.ping_ms.unwrap_or(9999);
+            let ping_b = b.ping_ms.unwrap_or(9999);
+            ping_a.cmp(&ping_b)
+        });
+
+        Ok(nodes)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {e}"))?
+}
+
 #[tauri::command]
 fn trim_memory() {
     trim_process_tree_working_set();
@@ -1514,6 +1776,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             trim_memory,
+            fetch_public_nodes,
             query_service_installation,
             detect_runtime,
             get_instance_state,

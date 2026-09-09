@@ -1,4 +1,7 @@
+import React, { useState } from 'react';
 import { NetworkConfig, NetworkingMethod, PortForwardConfig } from './network-config';
+import { PublicServerModal } from './components/PublicServerModal';
+import { IconGlobe } from './icons';
 
 interface FieldProps {
   label: string;
@@ -45,12 +48,37 @@ export function ToggleField({ label, value, onChange, hint }: { label: string; v
   );
 }
 
-export function StringListEditor({ title, values, onChange, placeholder }: { title: string; values: string[]; onChange: (v: string[]) => void; placeholder?: string }) {
+export function StringListEditor({
+  title,
+  values,
+  onChange,
+  placeholder,
+  onOpenPublicModal,
+}: {
+  title: string;
+  values: string[];
+  onChange: (v: string[]) => void;
+  placeholder?: string;
+  onOpenPublicModal?: () => void;
+}) {
   return (
     <div className="list-editor">
       <div className="list-editor-head">
         <span className="field-label">{title}</span>
-        <button type="button" className="mini-button" onClick={() => onChange([...values, ''])}>＋ 添加</button>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {onOpenPublicModal && (
+            <button
+              type="button"
+              className="mini-button"
+              style={{ fontSize: 11, padding: '3px 8px', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+              onClick={onOpenPublicModal}
+            >
+              <IconGlobe size={12} />
+              <span>公共节点</span>
+            </button>
+          )}
+          <button type="button" className="mini-button" onClick={() => onChange([...values, ''])}>＋ 添加</button>
+        </div>
       </div>
       {values.length === 0 && <p className="list-empty">暂无条目</p>}
       {values.map((v, i) => (
@@ -73,6 +101,8 @@ export interface EditorProps {
 export function ConfigEditor({ config: c, onChange, showAdvanced, onToggleAdvanced }: EditorProps) {
   const method = c.networking_method;
   const setMethod = (m: NetworkingMethod) => onChange({ networking_method: m });
+  const [showPublicModal, setShowPublicModal] = useState(false);
+  const [modalTarget, setModalTarget] = useState<'public' | 'peer'>('public');
 
   const updateForward = (id: string, patch: Partial<PortForwardConfig>) =>
     onChange({ port_forwards: c.port_forwards.map(f => (f.id === id ? { ...f, ...patch } : f)) });
@@ -95,10 +125,41 @@ export function ConfigEditor({ config: c, onChange, showAdvanced, onToggleAdvanc
           </div>
         </div>
         {method === 0 && (
-          <TextField label="公共服务器地址" value={c.public_server_url} onChange={v => onChange({ public_server_url: v })} placeholder="tcp://public.easytier.top:11010" />
+          <div className="field">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <span className="field-label" style={{ margin: 0 }}>公共服务器地址</span>
+              <button
+                type="button"
+                className="mini-button"
+                style={{ fontSize: 11, padding: '3px 10px', display: 'inline-flex', alignItems: 'center', gap: 5 }}
+                onClick={() => {
+                  setModalTarget('public');
+                  setShowPublicModal(true);
+                }}
+              >
+                <IconGlobe size={13} />
+                <span>选择公共节点 / 状态列表</span>
+              </button>
+            </div>
+            <input
+              className="field-input"
+              value={c.public_server_url}
+              onChange={e => onChange({ public_server_url: e.target.value })}
+              placeholder="tcp://public.easytier.top:11010"
+            />
+          </div>
         )}
         {method === 1 && (
-          <StringListEditor title="初始节点（Peer URL）" values={c.peer_urls} onChange={v => onChange({ peer_urls: v })} placeholder="tcp://192.168.1.10:11010" />
+          <StringListEditor
+            title="初始节点（Peer URL）"
+            values={c.peer_urls}
+            onChange={v => onChange({ peer_urls: v })}
+            placeholder="tcp://192.168.1.10:11010"
+            onOpenPublicModal={() => {
+              setModalTarget('peer');
+              setShowPublicModal(true);
+            }}
+          />
         )}
         <div className="grid-2">
           <label className="field">
@@ -213,6 +274,21 @@ export function ConfigEditor({ config: c, onChange, showAdvanced, onToggleAdvanc
           </section>
         </>
       )}
+
+      <PublicServerModal
+        isOpen={showPublicModal}
+        onClose={() => setShowPublicModal(false)}
+        currentAddress={modalTarget === 'public' ? c.public_server_url : undefined}
+        onSelect={addr => {
+          if (modalTarget === 'public') {
+            onChange({ public_server_url: addr });
+          } else {
+            if (!c.peer_urls.includes(addr)) {
+              onChange({ peer_urls: [...c.peer_urls.filter(Boolean), addr] });
+            }
+          }
+        }}
+      />
     </div>
   );
 }
