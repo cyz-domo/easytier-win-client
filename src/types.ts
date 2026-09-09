@@ -189,10 +189,10 @@ export const loadInstances = (): Instance[] => {
       ...i,
       id,
       status: healStatus(i.status),
-      config: { ...defaultConfig(), ...i.config } as NetworkConfig,
+      config: { ...defaultConfig(), ...i.config, instance_id: id } as NetworkConfig,
     };
   });
-  return saved.length
-    ? saved
-    : [{ id: crypto.randomUUID(), name: '我的网络', status: 'stopped', rpcPort: 15888, config: defaultConfig() }];
+  if (saved.length) return saved;
+  const defaultId = crypto.randomUUID();
+  return [{ id: defaultId, name: '我的网络', status: 'stopped', rpcPort: 15888, config: { ...defaultConfig(), instance_id: defaultId } }];
 };

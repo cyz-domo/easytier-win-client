@@ -102,10 +102,10 @@ function flagsOf(c: NetworkConfig): FlagsTOML {
   return f;
 }
 
-export function encodeTOML(c: NetworkConfig, exportSecrets = true): string {
+export function encodeTOML(c: NetworkConfig, exportSecrets = true, forExport = false): string {
   const d: DocumentTOML = {};
   d.instance_name = c.network_name || c.instance_id;
-  d.instance_id = c.instance_id;
+  d.instance_id = forExport ? undefined : c.instance_id;
   d.dhcp = c.dhcp;
   if (!c.dhcp && c.virtual_ipv4) d.ipv4 = `${c.virtual_ipv4}/${c.network_length}`;
   if (c.ipv6_public_addr_auto === true) d.ipv6_public_addr_auto = true;
@@ -141,7 +141,7 @@ export function encodeTOML(c: NetworkConfig, exportSecrets = true): string {
     lines.push(`${key} = ${value}`);
   };
   emit('instance_name', d.instance_name ? T(d.instance_name) : null);
-  emit('instance_id', d.instance_id ? T(d.instance_id) : null);
+  if (!forExport) emit('instance_id', d.instance_id ? T(d.instance_id) : null);
   if (d.dhcp != null) emit('dhcp', String(d.dhcp));
   emit('ipv4', d.ipv4 ? T(d.ipv4) : null);
   if (d.ipv6_public_addr_auto) emit('ipv6_public_addr_auto', 'true');

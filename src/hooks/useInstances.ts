@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { serviceRequest } from '../service-client';
 import { defaultConfig, listenersForInstance, NetworkConfig } from '../network-config';
 import { Instance, load, loadInstances, nextRpcPort } from '../types';
 
@@ -36,13 +37,13 @@ export function useInstances(
         name: '新网络',
         status: 'stopped',
         rpcPort: nextRpcPort(xs),
-        config: { ...defaultConfig(), listener_urls: listenersForInstance(xs.length) },
+        config: { ...defaultConfig(), instance_id: id, listener_urls: listenersForInstance(xs.length) },
       },
     ]);
     setActiveId(id);
   }, []);
 
-  // 删除实例：释放后端资源，清空该实例会话流量，且绝不再向 localStorage 写入旧版 traffic 数据
+  // 删除实例：释放后端资源，清空该实例会话流量，同步清除 Windows 服务中的残留实例
   const removeInstance = useCallback(
     (id: string) => {
       if (instances.length <= 1) return;
@@ -56,6 +57,7 @@ export function useInstances(
         invoke('drop_status_endpoint', { port: target.rpcPort }).catch(() => undefined);
       }
       invoke('drop_instance_state', { id }).catch(() => undefined);
+      serviceRequest('remove_instance', { instance_id: id }).catch(() => undefined);
       clearInstanceTraffic(id);
     },
     [instances, activeId, clearInstanceTraffic]

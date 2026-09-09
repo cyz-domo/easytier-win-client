@@ -57,6 +57,8 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
   const importToml = async (text: string) => {
     try {
       const config = decodeTOML(text);
+      // 保证导入的配置严格采用当前实例自己的独立 ID，防止复制配置导致 EasyTier 节点 ID 冲突
+      config.instance_id = current.id;
       const sameListeners =
         config.listener_urls.length === current.config.listener_urls.length &&
         config.listener_urls.every((u, i) => u === current.config.listener_urls[i]);
@@ -80,7 +82,8 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
     if (copy && hasSecret && !secretVisible) {
       if (!(await appConfirm('配置中包含网络密钥，确定复制到剪贴板吗？'))) return;
     }
-    const text = encodeTOML(current.config, true);
+    // 导出用于跨节点/跨实例分享的 TOML 时，跳过 instance_id，避免导入时产生节点 ID 冲突
+    const text = encodeTOML(current.config, true, true);
     try {
       if (copy) {
         await copyText(text, 'TOML 已复制到剪贴板');
@@ -121,6 +124,13 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({
       const config = decodeTOML(tomlDraft);
       const errors = validateConfig(config);
       if (errors.length) throw new Error(errors[0].message);
+      // 若草稿中的 instance_id 与其它实例发生冲突或为空，自动回退到当前实例自己的唯一 ID
+      const isConflicting = instances.some(
+        other => other.id !== current.id && (other.id === config.instance_id || other.config.instance_id === config.instance_id)
+      );
+      if (!config.instance_id || isConflicting) {
+        config.instance_id = current.id;
+      }
       setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, config } : i)));
       setTomlDraft(null);
       setTomlError(null);

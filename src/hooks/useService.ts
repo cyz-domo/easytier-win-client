@@ -106,24 +106,13 @@ export function useService(
               : i;
           });
           const existingIds = new Set(mapped.map(i => i.id));
-          const additions: Instance[] = [];
+          // 如果服务中残留了前端已经不存在的遗留/孤儿实例，自动向服务发送清理指令，绝不再在前端复活空实例
           for (const s of states) {
             if (!existingIds.has(s.id)) {
-              additions.push({
-                id: s.id,
-                name: s.name || '网络实例',
-                status: s.observed_state,
-                rpcPort: s.rpc_port ?? 15888,
-                config: defaultConfig(),
-                autoStart: s.auto_start,
-                desiredState: s.desired_state,
-                lastError: s.last_error,
-                remoteManageEnabled: s.remote_manage_enabled,
-                rpcWhitelistCidrs: s.rpc_whitelist_cidrs,
-              });
+              serviceRequest('remove_instance', { instance_id: s.id }).catch(() => undefined);
             }
           }
-          return additions.length > 0 ? [...mapped, ...additions] : mapped;
+          return mapped;
         });
       }
     } catch (e) {

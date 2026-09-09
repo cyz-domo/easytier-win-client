@@ -22,6 +22,49 @@ function normalizeNetworkLogs(value: unknown): string[] {
     .filter(Boolean);
 }
 
+function formatLogLine(line: string, view: 'runtime' | 'network'): React.ReactNode {
+  if (view === 'runtime') {
+    // 运行日志典型格式: "[17:15:20] [fn2] text..." 或 "[17:15:20] text..."
+    const match = line.match(/^(\[\d{1,2}:\d{2}:\d{2}\])\s*(?:(\[[^\]]+\])\s*)?(.*)$/);
+    if (match) {
+      const [, time, tag, rest] = match;
+      const isSuccess = rest.includes('✓') || rest.includes('成功') || rest.includes('已启动') || rest.includes('已连接');
+      const isError = rest.includes('✗') || rest.includes('失败') || rest.includes('异常') || rest.includes('错误');
+      const isWarn = rest.includes('⚠') || rest.includes('警告') || rest.includes('冲突');
+      const textClass = isSuccess ? 'log-text-success' : isError ? 'log-text-error' : isWarn ? 'log-text-warn' : '';
+
+      return (
+        <span className="log-line-content">
+          <span className="log-time">{time}</span>
+          {tag && <span className="log-tag">{tag.slice(1, -1)}</span>}
+          <span className={textClass}>{rest}</span>
+        </span>
+      );
+    }
+  } else {
+    // 组网日志典型格式: "2026-09-09T17:11:53... INFO CORE... [instance-id] message"
+    const isoMatch = line.match(/^(\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?)\s+([A-Z]+)\s+(.*)$/);
+    if (isoMatch) {
+      const [, , timeOnly, level, rest] = isoMatch;
+      const levelClass =
+        level === 'ERROR' ? 'log-level-error' : level === 'WARN' ? 'log-level-warn' : 'log-level-info';
+      return (
+        <span className="log-line-content">
+          <span className="log-time">[{timeOnly}]</span>
+          <span className={`log-level ${levelClass}`}>{level}</span>
+          <span>{rest}</span>
+        </span>
+      );
+    }
+    // 异常堆栈或错误行
+    if (line.toLowerCase().includes('error') || line.includes('TunnelError')) {
+      return <span className="log-line-content log-text-error">{line}</span>;
+    }
+  }
+
+  return <span className="log-line-content">{line}</span>;
+}
+
 export const LogsTab: React.FC<LogsTabProps> = ({
   current,
   logsByInstance,
@@ -98,7 +141,8 @@ export const LogsTab: React.FC<LogsTabProps> = ({
         ) : (
           activeLogs.map((l, i) => (
             <div className="log-line" key={i}>
-              {l}
+              <span className="log-line-num">{i + 1}</span>
+              {formatLogLine(l, logView)}
             </div>
           ))
         )}
