@@ -37,13 +37,18 @@
 
 ### 系统要求
 - Windows 10 (1809+) 或 Windows 11（推荐）
-- 系统自带或已安装 **Microsoft Edge WebView2 Runtime**
 - 架构：`x86_64` (Intel/AMD) 或 `aarch64` (ARM64)
+- 运行环境：默认使用系统自带的 **Microsoft Edge WebView2 Runtime**（Win11 自带、Win10 已全面更新预装；若系统无 WebView2，可下载自带内核的**完全脱机独立版**）
 
-### 安装方式
-1. 前往 **[Releases](https://github.com/cyz-domo/easytier-win-client/releases)** 页面下载最新发布包。
-2. **安装版 (`.exe`)**：运行安装程序，将自动配置后台常驻服务与防火墙规则。
-3. **便携版 (`.zip`)**：解压至任意目录，双击 `easytier-win-client.exe` 即可直接使用。
+### 安装与版本选择指南
+前往 **[Releases](https://github.com/cyz-domo/easytier-win-client/releases)** 页面获取发布包：
+
+| 版本文件 | 推荐场景 | 说明 |
+| :--- | :--- | :--- |
+| **`EasyTier_*_x64-setup.exe`** | 绝大多数用户（首选） | 标准安装包（~17MB），自动配置后台服务与防火墙，支持开机免登录自连。 |
+| **`easytier-win-client_x64_portable.zip`** | 个人日常便携使用 | 标准绿色免安装版（~24MB），解压直接使用，无系统残留。 |
+| **`EasyTier_*_x64-setup_offline.exe`** | 纯内网/隔离机房 | 离线安装包（~150MB），内嵌完整 WebView2 运行时，无需外网连接。 |
+| **`easytier-win-client_x64_portable_standalone.zip`** | 纯净虚拟机/精简版 Windows | 完全脱机独立版（~180MB），内置完整 WebView2 内核，无 Edge/无 WebView2 环境直接开箱即用。 |
 
 ---
 
