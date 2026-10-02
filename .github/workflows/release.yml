@@ -144,31 +144,52 @@ jobs:
           }
           Compress-Archive -Path "$bundle/*" -DestinationPath "dist-artifacts/$bundle.zip" -Force
 
-          # Assemble standalone portable package with embedded WebView2 for x64
-          if ('${{ matrix.arch }}' -eq 'x64') {
-            $bundleStandalone = "easytier-win-client_x64_portable_standalone"
-            New-Item -ItemType Directory -Force -Path "$bundleStandalone" | Out-Null
-            Copy-Item "$bundle/*" "$bundleStandalone" -Recurse -Force
-            
-            try {
-              $wv2Url = "https://go.microsoft.com/fwlink/p/?LinkId=2124701"
-              $wv2Installer = "$env:RUNNER_TEMP\wv2-installer.exe"
-              Invoke-WebRequest -Uri $wv2Url -OutFile $wv2Installer
-              
-              $sevenZip = "C:\Program Files\7-Zip\7z.exe"
-              if (Test-Path $sevenZip) {
-                $extractTemp = "$env:RUNNER_TEMP\wv2-extracted"
-                & $sevenZip x -y $wv2Installer -o"$extractTemp"
-                $exe = Get-ChildItem -Path $extractTemp -Recurse -Filter "msedgewebview2.exe" | Select-Object -First 1
-                if ($exe) {
-                  Copy-Item -Path ($exe.DirectoryName + '/*') -Destination "$bundleStandalone/webview2" -Recurse -Force
-                  Compress-Archive -Path "$bundleStandalone/*" -DestinationPath "dist-artifacts/$bundleStandalone.zip" -Force
-                }
-              }
-            } catch {
-              Write-Warning "Failed to unpack standalone webview2: $_"
-            }
-          }
+      - name: Build standalone portable with embedded WebView2 (x64 only, release/full builds)
+        if: >-
+          matrix.arch == 'x64' &&
+          (startsWith(github.ref, 'refs/tags/v') || inputs.create_release == true || inputs.full_release == true)
+        shell: pwsh
+        run: |
+          $bundle = 'easytier-win-client_x64_portable'
+          $bundleStandalone = "easytier-win-client_x64_portable_standalone"
+          if (-not (Test-Path $bundle)) { throw "Missing $bundle produced by the previous step" }
+          New-Item -ItemType Directory -Force -Path "$bundleStandalone" | Out-Null
+          Copy-Item "$bundle/*" "$bundleStandalone" -Recurse -Force
+
+          $wv2Url = "https://go.microsoft.com/fwlink/p/?LinkId=2124701"
+          $wv2Installer = "$env:RUNNER_TEMP\wv2-installer.exe"
+          Invoke-WebRequest -Uri $wv2Url -OutFile $wv2Installer
+          if (-not (Test-Path $wv2Installer)) { throw "WebView2 standalone installer was not downloaded" }
+
+          # The installer is a self-extracting PE whose payload is an MSI, so 7z
+          # alone only surfaces resource streams (.rsrc) and never the runtime
+          # files. A second pass with msiexec /a is what yields msedgewebview2.exe.
+          $extractTemp = "$env:RUNNER_TEMP\wv2-extracted"
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path $sevenZip)) { throw "7-Zip not found at $sevenZip" }
+          & $sevenZip x -y $wv2Installer "-o$extractTemp"
+          if ($LASTEXITCODE -ne 0) { throw "7z failed to unpack the WebView2 installer" }
+          $msi = Get-ChildItem -Path $extractTemp -Recurse -Filter '*.msi' | Select-Object -First 1
+          if (-not $msi) { throw "No MSI found inside the WebView2 installer" }
+
+          $adminDir = "$env:RUNNER_TEMP\wv2-admin"
+          $msiexec = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/a', "`"$($msi.FullName)`"", '/qb', "TARGETDIR=`"$adminDir`""
+          )
+          if (@(0, 3010) -notcontains $msiexec.ExitCode) { throw "msiexec /a exited with code $($msiexec.ExitCode)" }
+
+          $exe = Get-ChildItem -Path $adminDir -Recurse -Filter 'msedgewebview2.exe' | Select-Object -First 1
+          if (-not $exe) { throw "msedgewebview2.exe not found after extracting the WebView2 MSI" }
+          Copy-Item -Path (Join-Path $exe.DirectoryName '*') -Destination "$bundleStandalone/webview2" -Recurse -Force
+
+          $zipPath = "dist-artifacts/$bundleStandalone.zip"
+          Compress-Archive -Path "$bundleStandalone/*" -DestinationPath $zipPath -Force
+          $zip = Get-Item $zipPath
+          if (-not $zip) { throw "Standalone portable zip was not created at $zipPath" }
+          # The embedded runtime alone is ~200 MB extracted; anything much smaller
+          # means the copy or the compression silently lost it.
+          if ($zip.Length -lt 80MB) { throw "Standalone portable zip is only $($zip.Length) bytes; runtime not embedded" }
+          Write-Host "Standalone portable: $([math]::Round($zip.Length / 1MB, 1)) MB"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
