@@ -258,7 +258,13 @@ impl RuntimeManager {
     pub fn stop(&mut self, cfg: &InstanceConfig) -> Result<InstanceSnapshot, String> {
         if let Some(mut child) = self.children.remove(&cfg.id) {
             child.kill().map_err(|e| e.to_string())?;
-            let _ = child.wait();
+            // Bounded: callers hold the service state lock across stop(), and an
+            // unbounded wait on a core stuck in teardown serializes every other
+            // IPC request until the GUI times out.
+            let _ = wait_timeout::ChildExt::wait_timeout(
+                &mut child,
+                std::time::Duration::from_secs(3),
+            );
         }
         if let Some(pid) = self.adopted.remove(&cfg.id) {
             terminate_pid(pid);
@@ -273,7 +279,10 @@ impl RuntimeManager {
         for id in ids {
             if let Some(mut child) = self.children.remove(&id) {
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = wait_timeout::ChildExt::wait_timeout(
+                    &mut child,
+                    std::time::Duration::from_secs(3),
+                );
             }
             let _ = fs::remove_file(std::env::temp_dir().join(format!("easytier-{id}.toml")));
         }

@@ -112,7 +112,23 @@ fn paths(dir_override: Option<String>) -> (PathBuf, PathBuf) {
 struct ServiceInstallation {
     installed: bool,
     running: bool,
+    /// SCM reports STATE_STOPPED, or the service is not registered at all.
+    /// Distinct from `!running`: STOP_PENDING and the process's own teardown
+    /// both leave the service not running while it is still alive.
+    exited: bool,
     message: Option<String>,
+}
+
+/// SCM state code from a `sc query` STATE line: 1 STOPPED, 2 START_PENDING,
+/// 3 STOP_PENDING, 4 RUNNING, 5/6 continue- and pause-pending.
+fn service_state_code(text: &str) -> Option<u32> {
+    text.lines()
+        .find(|line| line.trim_start().starts_with("STATE"))
+        .and_then(|line| {
+            line.split_whitespace()
+                .find(|token| !token.is_empty() && token.chars().all(|c| c.is_ascii_digit()))
+                .and_then(|token| token.parse().ok())
+        })
 }
 
 fn service_query() -> ServiceInstallation {
@@ -125,21 +141,36 @@ fn service_query() -> ServiceInstallation {
         match output {
             Ok(output) if output.status.success() => {
                 let text = String::from_utf8_lossy(&output.stdout);
-                let running = text.contains("RUNNING") || text.contains("START_PENDING");
+                let running = match service_state_code(&text) {
+                    Some(code) => code == 4 || code == 2,
+                    None => text.contains("RUNNING") || text.contains("START_PENDING"),
+                };
                 ServiceInstallation {
                     installed: true,
                     running,
+                    exited: if running {
+                        false
+                    } else {
+                        match service_state_code(&text) {
+                            Some(code) => code == 1,
+                            None => text.contains("STOPPED"),
+                        }
+                    },
                     message: None,
                 }
             }
+            // A failed query means the service is not registered (1060), so
+            // there is no process to wait for.
             Ok(_) => ServiceInstallation {
                 installed: false,
                 running: false,
+                exited: true,
                 message: None,
             },
             Err(error) => ServiceInstallation {
                 installed: false,
                 running: false,
+                exited: true,
                 message: Some(format!("无法查询服务：{error}")),
             },
         }
@@ -149,6 +180,7 @@ fn service_query() -> ServiceInstallation {
         ServiceInstallation {
             installed: false,
             running: false,
+            exited: true,
             message: Some("Windows 服务不可用".into()),
         }
     }
@@ -953,12 +985,13 @@ async fn install_service() -> Result<String, String> {
                 .args(["stop", "EasyTierService"])
                 .creation_flags(0x08000000)
                 .output();
-            // Wait for the service process to fully exit before re-creating,
-            // otherwise the named pipe from the old process still exists and
-            // the new instance cannot bind it, making repair permanently fail.
+            // Wait for STATE_STOPPED, not merely for "not running": while SCM
+            // reports STOP_PENDING the old process is still alive and its named
+            // pipe handles are still open, so the new instance cannot bind the
+            // pipe and repair fails.
             for _ in 0..15 {
                 let q = service_query();
-                if !q.running {
+                if q.exited || !q.installed {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -967,18 +1000,27 @@ async fn install_service() -> Result<String, String> {
                 "create EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto DisplayName= \"EasyTier Service\"",
                 service_path, trusted_sid
             );
-            let mut create_cmd = Command::new("sc.exe");
-            create_cmd.raw_arg(&sc_create_cmd).creation_flags(0x08000000);
-            let create_res = create_cmd.output();
-            if let Ok(res) = create_res {
-                if !res.status.success() {
-                    let sc_config_cmd = format!(
-                        "config EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto",
-                        service_path, trusted_sid
-                    );
-                    let mut config_cmd = Command::new("sc.exe");
-                    config_cmd.raw_arg(&sc_config_cmd).creation_flags(0x08000000);
-                    let _ = config_cmd.output();
+            let sc_config_cmd = format!(
+                "config EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto",
+                service_path, trusted_sid
+            );
+            // create fails while the old registration is still present (1073)
+            // or still draining after a delete (1072); config resolves the
+            // first, retrying resolves the second.
+            'register: for attempt in 0..5 {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                for sc_args in [&sc_create_cmd, &sc_config_cmd] {
+                    let mut cmd = Command::new("sc.exe");
+                    cmd.raw_arg(sc_args).creation_flags(0x08000000);
+                    if cmd
+                        .output()
+                        .map(|res| res.status.success())
+                        .unwrap_or(false)
+                    {
+                        break 'register;
+                    }
                 }
             }
             let _ = Command::new("sc.exe")
@@ -996,7 +1038,7 @@ async fn install_service() -> Result<String, String> {
                 "@echo off\r\n\
                  chcp 65001 >nul\r\n\
                  sc.exe stop EasyTierService >nul 2>&1\r\n\
-                 timeout /t 3 /nobreak >nul\r\n\
+                 ping -n 4 127.0.0.1 >nul\r\n\
                  sc.exe create EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto DisplayName= \"EasyTier Service\"\r\n\
                  if %ERRORLEVEL% NEQ 0 (\r\n\
                      sc.exe config EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto\r\n\

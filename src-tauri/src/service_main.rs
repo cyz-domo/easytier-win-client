@@ -556,7 +556,20 @@ mod windows_service {
         if req.protocol_version != ipc::PROTOCOL_VERSION {
             return ipc::error(&req, "invalid_request", "unsupported protocol version");
         }
+        let ipc_start = std::time::Instant::now();
         let result = dispatch(&req, state, runtime, tasks, update_lock, stopped_opt, logger);
+        let elapsed = ipc_start.elapsed();
+        if elapsed > std::time::Duration::from_millis(200) {
+            service_log(
+                logger,
+                "WARN",
+                format!(
+                    "IPC {} held the state lock for {} ms",
+                    req.command,
+                    elapsed.as_millis()
+                ),
+            );
+        }
         let response = match result {
             Ok(v) => ipc::response(&req, v),
             Err((c, m)) => ipc::error(&req, c, m),
@@ -683,8 +696,10 @@ mod windows_service {
                         .unwrap()
                         .start(c)
                         .map_err(|e| ("core_not_found", e))?;
-                    // Brief readiness probe; the lock is released between
-                    // probes so other IPC requests are not blocked.
+                    // Brief readiness probe. Only the runtime lock is released
+                    // between probes; the state lock taken at the top of
+                    // dispatch() is held until it returns, so these sleeps do
+                    // serialize other IPC requests.
                     for _ in 0..3 {
                         if runtime.lock().unwrap().portal_ready(c) {
                             break;
