@@ -1,6 +1,6 @@
 # Temporary probe: runs the exact standalone-portable body from release.yml against a
-# stubbed bundle so the WebView2 extraction recipe can be validated in minutes instead
-# of a full release build. Delete once proven.
+# stubbed bundle so the WebView2 packaging recipe can be validated in minutes instead of
+# a full release build. Delete once the recipe is proven in release.yml.
 name: WV2 standalone extraction probe
 
 on:
@@ -50,12 +50,18 @@ jobs:
             Write-Host "installer '$argSet' exited $lastExit and left no runtime; trying the next argument set"
           }
           if (-not $runtime) { throw "WebView2 runtime was not installed (last exit code: $lastExit)" }
+          Write-Host "Using WebView2 runtime $($runtime.Name) from $($runtime.FullName)"
 
           New-Item -ItemType Directory -Force -Path $bundleStandalone | Out-Null
           Copy-Item "$bundle/*" $bundleStandalone -Recurse -Force
-          Copy-Item -Path (Join-Path $runtime.FullName '*') -Destination (Join-Path $bundleStandalone 'webview2') -Recurse -Force
-          if (-not (Test-Path (Join-Path $bundleStandalone 'webview2\msedgewebview2.exe'))) {
-            throw "webview2/msedgewebview2.exe missing; runtime dir was $($runtime.FullName)"
+          # The destination must exist first: copying a wildcard set onto a missing path
+          # makes Copy-Item create it from the first item, then fail with "Container
+          # cannot be copied onto existing leaf item" on the runtime's subdirectories.
+          $webview2Dir = Join-Path $bundleStandalone 'webview2'
+          New-Item -ItemType Directory -Force -Path $webview2Dir | Out-Null
+          Copy-Item -Path (Join-Path $runtime.FullName '*') -Destination $webview2Dir -Recurse -Force
+          if (-not (Test-Path (Join-Path $webview2Dir 'msedgewebview2.exe'))) {
+            throw "webview2/msedgewebview2.exe missing; runtime source was $($runtime.FullName)"
           }
 
           $zipPath = "dist-artifacts/$bundleStandalone.zip"
@@ -72,6 +78,8 @@ jobs:
             $core = $entries | Where-Object { $_.FullName -eq 'webview2/msedgewebview2.exe' } | Select-Object -First 1
             if (-not $core) { throw 'packaged zip has no webview2/msedgewebview2.exe entry' }
             $wv2 = @($entries | Where-Object { $_.FullName -like 'webview2/*' })
-            Write-Host ("zip entries={0} webview2_files={1} webview2_uncompressed_MB={2} core={3}" -f `
-              $entries.Count, $wv2.Count, [math]::Round((($wv2 | Measure-Object Length -Sum).Sum / 1MB), 1), $core.Length)
+            $dirs = @($wv2 | Where-Object { $_.FullName -like 'webview2/*/*' -and $_.Length -gt 0 })
+            if ($dirs.Count -eq 0) { throw 'packaged runtime has no subdirectory files; copy was incomplete' }
+            Write-Host ("zip entries={0} webview2_files={1} webview2_in_subdirs={2} webview2_uncompressed_MB={3} core_bytes={4}" -f `
+              $entries.Count, $wv2.Count, $dirs.Count, [math]::Round((($wv2 | Measure-Object Length -Sum).Sum / 1MB), 1), $core.Length)
           } finally { $zipFile.Dispose() }

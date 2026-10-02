@@ -184,12 +184,18 @@ jobs:
             Write-Host "installer '$argSet' exited $lastExit and left no runtime; trying the next argument set"
           }
           if (-not $runtime) { throw "WebView2 runtime was not installed (last exit code: $lastExit)" }
+          Write-Host "Using WebView2 runtime $($runtime.Name) from $($runtime.FullName)"
 
           New-Item -ItemType Directory -Force -Path $bundleStandalone | Out-Null
           Copy-Item "$bundle/*" $bundleStandalone -Recurse -Force
-          Copy-Item -Path (Join-Path $runtime.FullName '*') -Destination (Join-Path $bundleStandalone 'webview2') -Recurse -Force
-          if (-not (Test-Path (Join-Path $bundleStandalone 'webview2\msedgewebview2.exe'))) {
-            throw "webview2/msedgewebview2.exe missing; runtime dir was $($runtime.FullName)"
+          # The destination must exist first: copying a wildcard set onto a missing path
+          # makes Copy-Item create it from the first item, then fail with "Container
+          # cannot be copied onto existing leaf item" on the runtime's subdirectories.
+          $webview2Dir = Join-Path $bundleStandalone 'webview2'
+          New-Item -ItemType Directory -Force -Path $webview2Dir | Out-Null
+          Copy-Item -Path (Join-Path $runtime.FullName '*') -Destination $webview2Dir -Recurse -Force
+          if (-not (Test-Path (Join-Path $webview2Dir 'msedgewebview2.exe'))) {
+            throw "webview2/msedgewebview2.exe missing; runtime source was $($runtime.FullName)"
           }
 
           $zipPath = "dist-artifacts/$bundleStandalone.zip"
