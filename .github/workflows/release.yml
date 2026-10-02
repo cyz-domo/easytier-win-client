@@ -16,7 +16,7 @@ on:
         required: false
         type: boolean
       full_release:
-        description: Also build offline installer + standalone WebView2 portable (slow, ~180 MB)
+        description: Also build offline installer + standalone WebView2 portable (slow, ~390 MB)
         default: false
         required: false
         type: boolean
@@ -238,12 +238,12 @@ jobs:
 
             | 文件名 | 类型 | 预计体积 | 适用场景与推荐建议 |
             | :--- | :--- | :--- | :--- |
-            | **`EasyTier_*_x64-setup.exe`** | **标准安装包（推荐首选）** | ~17 MB | **绝大多数用户推荐下载**。适用于 Windows 11 / Windows 10。安装程序会自动注册后台常驻系统服务；若系统缺少 WebView2，安装器会自动联网静默补齐。 |
-            | **`easytier-win-client_x64_portable.zip`** | **标准绿色便携版** | ~24 MB | 解压即用，无任何系统残留。适合日常使用、便携式 U 盘随身携带。 |
-            | **`EasyTier_*_x64-setup_offline.exe`** | **离线安装包（纯内网机房）** | ~150 MB | **适合无外网连接的机房/离线局域网**。安装包内嵌了微软官方 WebView2 离线运行时，安装全程无需连接互联网。 |
-            | **`easytier-win-client_x64_portable_standalone.zip`** | **完全脱机独立免安装版** | ~180 MB | **适合纯净虚拟机、精简版 Windows（无 Edge / 无任何系统组件）**。内置完整独立 WebView2 运行时，无需安装任何系统组件，解压双击直接运行。 |
-            | **`easytier-win-client_arm64_portable.zip`** | **ARM64 便携版** | ~24 MB | 适用于高通骁龙等 ARM 架构的 Windows 电脑（如 Surface Pro X、Copilot+ PC 等）。 |
-            | **`EasyTier_*_arm64-setup.exe`** | **ARM64 安装包** | ~17 MB | 适用于 ARM 架构 Windows 电脑的安装包。 |
+            | **`EasyTier_*_x64-setup.exe`** | **标准安装包（推荐首选）** | ~29 MB | **绝大多数用户推荐下载**。适用于 Windows 11 / Windows 10。安装程序会自动注册后台常驻系统服务；若系统缺少 WebView2，安装器会自动联网静默补齐。 |
+            | **`easytier-win-client_x64_portable.zip`** | **标准绿色便携版** | ~43 MB | 解压即用，无任何系统残留。适合日常使用、便携式 U 盘随身携带。 |
+            | **`EasyTier_*_x64-setup_offline.exe`** | **离线安装包（纯内网机房）** | ~235 MB | **适合无外网连接的机房/离线局域网**。安装包内嵌了微软官方 WebView2 离线运行时，安装全程无需连接互联网。 |
+            | **`easytier-win-client_x64_portable_standalone.zip`** | **完全脱机独立免安装版** | ~390 MB | **适合纯净虚拟机、精简版 Windows（无 Edge / 无任何系统组件）**。随包附带固定版本（fixed version）WebView2 内核（解压后约 860 MB，内核版本见构建日志），无需安装任何系统组件，解压双击直接运行。 |
+            | **`easytier-win-client_arm64_portable.zip`** | **ARM64 便携版** | ~40 MB | 适用于高通骁龙等 ARM 架构的 Windows 电脑（如 Surface Pro X、Copilot+ PC 等）。 |
+            | **`EasyTier_*_arm64-setup.exe`** | **ARM64 安装包** | ~34 MB | 适用于 ARM 架构 Windows 电脑的安装包。 |
 
             ---
             *注：EasyTier 后台核心与服务为纯 Rust 原生进程，即使在完全无界面的 Windows Server 环境下也可作为独立后台服务稳定运行。*

@@ -45,10 +45,10 @@
 
 | 版本文件 | 推荐场景 | 说明 |
 | :--- | :--- | :--- |
-| **`EasyTier_*_x64-setup.exe`** | 绝大多数用户（首选） | 标准安装包（~17MB），自动配置后台服务与防火墙，支持开机免登录自连。 |
-| **`easytier-win-client_x64_portable.zip`** | 个人日常便携使用 | 标准绿色免安装版（~24MB），解压直接使用，无系统残留。 |
-| **`EasyTier_*_x64-setup_offline.exe`** | 纯内网/隔离机房 | 离线安装包（~150MB），内嵌完整 WebView2 运行时，无需外网连接。 |
-| **`easytier-win-client_x64_portable_standalone.zip`** | 纯净虚拟机/精简版 Windows | 完全脱机独立版（~180MB），内置完整 WebView2 内核，无 Edge/无 WebView2 环境直接开箱即用。 |
+| **`EasyTier_*_x64-setup.exe`** | 绝大多数用户（首选） | 标准安装包（~29MB），自动配置后台服务与防火墙，支持开机免登录自连。 |
+| **`easytier-win-client_x64_portable.zip`** | 个人日常便携使用 | 标准绿色免安装版（~43MB），解压直接使用，无系统残留。 |
+| **`EasyTier_*_x64-setup_offline.exe`** | 纯内网/隔离机房 | 离线安装包（~235MB），内嵌完整 WebView2 运行时，无需外网连接。 |
+| **`easytier-win-client_x64_portable_standalone.zip`** | 纯净虚拟机/精简版 Windows | 完全脱机独立版（~390MB），随包附带固定版本（fixed version）WebView2 内核（解压后约 860MB），无 Edge/无 WebView2 环境直接开箱即用。 |
 
 ---
 
