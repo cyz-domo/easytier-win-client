@@ -156,40 +156,48 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$bundleStandalone" | Out-Null
           Copy-Item "$bundle/*" "$bundleStandalone" -Recurse -Force
 
-          $wv2Url = "https://go.microsoft.com/fwlink/p/?LinkId=2124701"
-          $wv2Installer = "$env:RUNNER_TEMP\wv2-installer.exe"
-          Invoke-WebRequest -Uri $wv2Url -OutFile $wv2Installer
-          if (-not (Test-Path $wv2Installer)) { throw "WebView2 standalone installer was not downloaded" }
+          # The fwlink installer is an EdgeUpdate setup whose 212 MB payload is one
+          # opaque compressed blob: no MSI/CAB/ZIP can be carved out of it offline,
+          # so the runtime files only exist after a real install. The runner is an
+          # ephemeral VM, and src-tauri/src/main.rs points WebView2 at the copied
+          # folder through WEBVIEW2_BROWSER_EXECUTABLE_FOLDER, which is exactly the
+          # fixed-version layout a portable package needs.
+          $wv2Installer = Join-Path $env:RUNNER_TEMP 'wv2-installer.exe'
+          Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124701' -OutFile $wv2Installer
+          if (-not (Test-Path $wv2Installer)) { throw 'WebView2 standalone installer was not downloaded' }
 
-          # The installer is a self-extracting PE whose payload is an MSI, so 7z
-          # alone only surfaces resource streams (.rsrc) and never the runtime
-          # files. A second pass with msiexec /a is what yields msedgewebview2.exe.
-          $extractTemp = "$env:RUNNER_TEMP\wv2-extracted"
-          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
-          if (-not (Test-Path $sevenZip)) { throw "7-Zip not found at $sevenZip" }
-          & $sevenZip x -y $wv2Installer "-o$extractTemp"
-          if ($LASTEXITCODE -ne 0) { throw "7z failed to unpack the WebView2 installer" }
-          $msi = Get-ChildItem -Path $extractTemp -Recurse -Filter '*.msi' | Select-Object -First 1
-          if (-not $msi) { throw "No MSI found inside the WebView2 installer" }
+          $appRoot = Join-Path ${env:ProgramFiles(x86)} 'Microsoft\EdgeWebView\Application'
+          function Find-Webview2Runtime {
+            Get-ChildItem -Path $appRoot -Directory -ErrorAction SilentlyContinue |
+              Where-Object { Test-Path (Join-Path $_.FullName 'msedgewebview2.exe') } |
+              Sort-Object -Descending Name |
+              Select-Object -First 1
+          }
 
-          $adminDir = "$env:RUNNER_TEMP\wv2-admin"
-          $msiexec = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
-            '/a', "`"$($msi.FullName)`"", '/qb', "TARGETDIR=`"$adminDir`""
-          )
-          if (@(0, 3010) -notcontains $msiexec.ExitCode) { throw "msiexec /a exited with code $($msiexec.ExitCode)" }
+          $runtime = $null
+          $lastExit = $null
+          foreach ($argSet in @('/silent /install', '--install --silent')) {
+            $installer = Start-Process -FilePath $wv2Installer -ArgumentList $argSet.Split(' ') -Wait -PassThru
+            $lastExit = $installer.ExitCode
+            $runtime = Find-Webview2Runtime
+            if ($runtime) { break }
+            Write-Host "installer '$argSet' exited $lastExit and left no runtime; trying the next argument set"
+          }
+          if (-not $runtime) { throw "WebView2 runtime was not installed (last exit code: $lastExit)" }
 
-          $exe = Get-ChildItem -Path $adminDir -Recurse -Filter 'msedgewebview2.exe' | Select-Object -First 1
-          if (-not $exe) { throw "msedgewebview2.exe not found after extracting the WebView2 MSI" }
-          Copy-Item -Path (Join-Path $exe.DirectoryName '*') -Destination "$bundleStandalone/webview2" -Recurse -Force
+          New-Item -ItemType Directory -Force -Path $bundleStandalone | Out-Null
+          Copy-Item "$bundle/*" $bundleStandalone -Recurse -Force
+          Copy-Item -Path (Join-Path $runtime.FullName '*') -Destination (Join-Path $bundleStandalone 'webview2') -Recurse -Force
+          if (-not (Test-Path (Join-Path $bundleStandalone 'webview2\msedgewebview2.exe'))) {
+            throw "webview2/msedgewebview2.exe missing; runtime dir was $($runtime.FullName)"
+          }
 
           $zipPath = "dist-artifacts/$bundleStandalone.zip"
           Compress-Archive -Path "$bundleStandalone/*" -DestinationPath $zipPath -Force
           $zip = Get-Item $zipPath
           if (-not $zip) { throw "Standalone portable zip was not created at $zipPath" }
-          # The embedded runtime alone is ~200 MB extracted; anything much smaller
-          # means the copy or the compression silently lost it.
           if ($zip.Length -lt 80MB) { throw "Standalone portable zip is only $($zip.Length) bytes; runtime not embedded" }
-          Write-Host "Standalone portable: $([math]::Round($zip.Length / 1MB, 1)) MB"
+          Write-Host "Standalone portable: WebView2 $($runtime.Name), $([math]::Round($zip.Length / 1MB, 1)) MB"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
