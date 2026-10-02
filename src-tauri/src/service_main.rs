@@ -502,6 +502,17 @@ mod windows_service {
                 // and the restart would be undone: the user's stop sets
                 // desired_state=Stopped before killing the core, so holding
                 // the lock across check+start makes the pair atomic.
+                //
+                // Clean up orphans BEFORE acquiring the state lock:
+                // find_orphan_cores spawns PowerShell (3-10 s) and must never
+                // hold the lock, otherwise every IPC dispatch blocks waiting
+                // for it and the service appears dead to the GUI.
+                if let Some((_, pid)) = find_orphan_cores(std::slice::from_ref(&cfg.id))
+                    .into_iter()
+                    .next()
+                {
+                    runtime_manager::terminate_pid(pid);
+                }
                 let s = state.lock().unwrap();
                 if !s
                     .instances
@@ -510,14 +521,6 @@ mod windows_service {
                 {
                     track.remove(&cfg.id);
                     continue;
-                }
-                // A core we do not own may still hold the instance's ports
-                // (e.g. left by a compat-mode GUI start); take it down first.
-                if let Some((_, pid)) = find_orphan_cores(std::slice::from_ref(&cfg.id))
-                    .into_iter()
-                    .next()
-                {
-                    runtime_manager::terminate_pid(pid);
                 }
                 let mut r = runtime.lock().unwrap();
                 if let Err(e) = r.start(&cfg) {

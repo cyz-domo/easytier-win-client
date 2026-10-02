@@ -953,6 +953,16 @@ async fn install_service() -> Result<String, String> {
                 .args(["stop", "EasyTierService"])
                 .creation_flags(0x08000000)
                 .output();
+            // Wait for the service process to fully exit before re-creating,
+            // otherwise the named pipe from the old process still exists and
+            // the new instance cannot bind it, making repair permanently fail.
+            for _ in 0..15 {
+                let q = service_query();
+                if !q.running {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
             let sc_create_cmd = format!(
                 "create EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto DisplayName= \"EasyTier Service\"",
                 service_path, trusted_sid
@@ -986,6 +996,7 @@ async fn install_service() -> Result<String, String> {
                 "@echo off\r\n\
                  chcp 65001 >nul\r\n\
                  sc.exe stop EasyTierService >nul 2>&1\r\n\
+                 timeout /t 3 /nobreak >nul\r\n\
                  sc.exe create EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto DisplayName= \"EasyTier Service\"\r\n\
                  if %ERRORLEVEL% NEQ 0 (\r\n\
                      sc.exe config EasyTierService binPath= \"\\\"{}\\\" --interactive-user-sid={}\" start= auto\r\n\
