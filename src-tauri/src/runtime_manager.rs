@@ -150,6 +150,7 @@ pub struct InstanceSnapshot {
     pub observed_state: ObservedState,
     pub pid: Option<u32>,
     pub last_error: Option<String>,
+    pub console_log_level: Option<String>,
 }
 
 pub struct RuntimeManager {
@@ -163,6 +164,19 @@ pub struct RuntimeManager {
     pub core_path: std::path::PathBuf,
 }
 pub type SharedRuntime = Arc<Mutex<RuntimeManager>>;
+
+/// Validate a user-supplied console log level and turn it into the core CLI
+/// args. easytier 2.6.4 only accepts the level via `--console-log-level`
+/// (there is no TOML key), and rejects unknown values, so filter here.
+pub fn console_log_level_args(level: Option<&str>) -> Vec<String> {
+    const VALID: [&str; 6] = ["off", "error", "warn", "info", "debug", "trace"];
+    match level.map(str::trim).filter(|l| !l.is_empty()) {
+        Some(l) if VALID.contains(&l.to_lowercase().as_str()) => {
+            vec!["--console-log-level".to_string(), l.to_lowercase()]
+        }
+        _ => Vec::new(),
+    }
+}
 
 impl RuntimeManager {
     pub fn new(core_path: impl Into<std::path::PathBuf>) -> Self {
@@ -225,6 +239,7 @@ impl RuntimeManager {
                 .map(Child::id)
                 .or_else(|| self.adopted.get(&cfg.id).copied()),
             last_error: error,
+            console_log_level: cfg.console_log_level.clone(),
         }
     }
     pub fn logs(&self, id: &str) -> String {
@@ -270,6 +285,7 @@ impl RuntimeManager {
                 cfg.rpc_port,
                 &cfg.rpc_whitelist_cidrs,
             ))
+            .args(console_log_level_args(cfg.console_log_level.as_deref()))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

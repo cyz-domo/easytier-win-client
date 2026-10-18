@@ -15,6 +15,7 @@ export interface Instance {
   lastError?: string | null;
   remoteManageEnabled?: boolean;
   rpcWhitelistCidrs?: string[];
+  consoleLogLevel?: string;
 }
 
 export interface InstanceSnapshot {

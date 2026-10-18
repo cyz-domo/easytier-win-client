@@ -206,6 +206,7 @@ export function useKernelUpdate(
           rpc_port: i.rpcPort,
           remote_manage_enabled: i.remoteManageEnabled ?? false,
           rpc_whitelist_cidrs: i.rpcWhitelistCidrs ?? [],
+          console_log_level: i.consoleLogLevel ?? null,
         }));
 
       setKernelUpdate({

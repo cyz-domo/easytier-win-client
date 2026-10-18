@@ -72,6 +72,8 @@ struct RestartInstance {
     remote_manage_enabled: bool,
     #[serde(default)]
     rpc_whitelist_cidrs: Vec<String>,
+    #[serde(default)]
+    console_log_level: Option<String>,
 }
 
 #[derive(Default)]
@@ -295,6 +297,7 @@ fn start_instance(
     rpc_portal: Option<String>,
     remote_manage_enabled: Option<bool>,
     rpc_whitelist_cidrs: Option<Vec<String>>,
+    console_log_level: Option<String>,
     dir_override: Option<String>,
     state: tauri::State<'_, Mutex<RuntimeProcesses>>,
 ) -> Result<InstanceState, String> {
@@ -340,6 +343,9 @@ fn start_instance(
     } else if let Some(portal) = rpc_portal.as_deref() {
         cmd.arg("--rpc-portal").arg(portal);
     }
+    cmd.args(runtime_manager::console_log_level_args(
+        console_log_level.as_deref(),
+    ));
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let pid = child.id();
     let log = p
@@ -622,6 +628,9 @@ async fn update_kernel(
                     instance.remote_manage_enabled,
                     instance.rpc_port,
                     &instance.rpc_whitelist_cidrs,
+                ))
+                .args(runtime_manager::console_log_level_args(
+                    instance.console_log_level.as_deref(),
                 ))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())

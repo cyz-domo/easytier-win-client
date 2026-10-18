@@ -102,6 +102,7 @@ export function useService(
                   lastError: s.last_error,
                   remoteManageEnabled: s.remote_manage_enabled ?? i.remoteManageEnabled,
                   rpcWhitelistCidrs: s.rpc_whitelist_cidrs ?? i.rpcWhitelistCidrs,
+                  consoleLogLevel: s.console_log_level ?? i.consoleLogLevel,
                 }
               : i;
           });

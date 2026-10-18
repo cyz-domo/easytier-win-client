@@ -52,6 +52,7 @@ export interface ServiceInstanceState {
   last_error?: string | null;
   remote_manage_enabled?: boolean;
   rpc_whitelist_cidrs?: string[];
+  console_log_level?: string | null;
 }
 
 export async function serviceRequest<TData = unknown, TPayload extends Record<string, unknown> = Record<string, unknown>>(

@@ -11,7 +11,10 @@ interface LogsTabProps {
   serviceMode: boolean;
   refreshSecs: RefreshInterval;
   isWindowVisible: boolean;
+  onChangeLogLevel: (level: string | undefined) => Promise<void>;
 }
+
+const KERNEL_LOG_LEVELS = ['off', 'error', 'warn', 'info', 'debug', 'trace'] as const;
 
 function normalizeNetworkLogs(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(v => String(v));
@@ -24,11 +27,18 @@ function normalizeNetworkLogs(value: unknown): string[] {
 
 export type LogLevel = 'ALL' | 'INFO' | 'WARN' | 'ERROR' | 'DEBUG';
 
+function contentLooksLikeError(line: string): boolean {
+  const lower = line.toLowerCase();
+  return lower.includes('error') || lower.includes('fail') || lower.includes('panic') || line.includes('TunnelError');
+}
+
 function extractLogLevel(line: string): LogLevel | 'UNKNOWN' {
   const isoMatch = line.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?\s+([A-Z]+)\s+/);
   if (isoMatch) {
     const lvl = isoMatch[1].toUpperCase();
-    if (lvl === 'INFO' || lvl === 'WARN' || lvl === 'ERROR' || lvl === 'DEBUG') {
+    // easytier-core 把连接失败等信息也打在 INFO 级，按内容升级为 ERROR 归类
+    if (lvl === 'INFO') return contentLooksLikeError(line) ? 'ERROR' : 'INFO';
+    if (lvl === 'WARN' || lvl === 'ERROR' || lvl === 'DEBUG') {
       return lvl as LogLevel;
     }
     if (lvl === 'TRACE') return 'DEBUG';
@@ -67,7 +77,9 @@ function formatLogLine(line: string, view: 'runtime' | 'network'): React.ReactNo
     // 组网日志典型格式: "2026-09-09T17:11:53... INFO CORE... [instance-id] message"
     const isoMatch = line.match(/^(\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?)\s+([A-Z]+)\s+(.*)$/);
     if (isoMatch) {
-      const [, , timeOnly, level, rest] = isoMatch;
+      const [, , timeOnly, rawLevel, rest] = isoMatch;
+      // 与 extractLogLevel 保持一致：INFO 级但内容含错误关键字的行按 ERROR 展示
+      const level = rawLevel === 'INFO' && contentLooksLikeError(rest) ? 'ERROR' : rawLevel;
       const levelClass =
         level === 'ERROR'
           ? 'log-level-error'
@@ -105,12 +117,25 @@ export const LogsTab: React.FC<LogsTabProps> = ({
   serviceMode,
   refreshSecs,
   isWindowVisible,
+  onChangeLogLevel,
 }) => {
   const [logView, setLogView] = useState<'runtime' | 'network'>('runtime');
   const [networkLogs, setNetworkLogs] = useState<string[]>([]);
   const [levelFilter, setLevelFilter] = useState<LogLevel>('ALL');
   const [logFetchError, setLogFetchError] = useState<string | null>(null);
+  const [levelSaving, setLevelSaving] = useState(false);
   const logTimer = useRef<number | null>(null);
+
+  const kernelLevel = current.consoleLogLevel ?? 'info';
+  const applyKernelLevel = async (next: string) => {
+    setLevelSaving(true);
+    try {
+      // 'info' 是内核默认值，仍显式下发，让用户选择可被忠实持久化到 core 启动参数
+      await onChangeLogLevel(next);
+    } finally {
+      setLevelSaving(false);
+    }
+  };
 
   const clearNetworkLogs = () => {
     setNetworkLogs([]);
@@ -221,6 +246,27 @@ export const LogsTab: React.FC<LogsTabProps> = ({
                 );
               })}
             </div>
+          )}
+
+          {logView === 'network' && (
+            <label
+              className="kernel-level-picker"
+              style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}
+              title="easytier-core 控制台日志级别：修改后会（询问）重启该网络使其生效，级别持久保存在实例配置中"
+            >
+              <span>内核日志级别</span>
+              <select
+                value={kernelLevel}
+                disabled={levelSaving}
+                onChange={e => void applyKernelLevel(e.target.value)}
+              >
+                {KERNEL_LOG_LEVELS.map(l => (
+                  <option key={l} value={l}>
+                    {l === 'info' ? 'info（默认）' : l}
+                  </option>
+                ))}
+              </select>
+            </label>
           )}
         </div>
 

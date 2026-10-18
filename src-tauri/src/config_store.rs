@@ -27,6 +27,11 @@ pub struct InstanceConfig {
     /// network segments only.
     #[serde(default)]
     pub rpc_whitelist_cidrs: Vec<String>,
+    /// easytier-core `--console-log-level` value (off/error/warn/info/debug/
+    /// trace). None keeps the kernel default; the level is a CLI arg only in
+    /// easytier 2.6.4, so it must be passed when spawning the core process.
+    #[serde(default)]
+    pub console_log_level: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

@@ -170,6 +170,7 @@ export default function App() {
             rpcPortal: `127.0.0.1:${inst.rpcPort}`,
             remoteManageEnabled: inst.remoteManageEnabled ?? false,
             rpcWhitelistCidrs: inst.rpcWhitelistCidrs ?? [],
+            consoleLogLevel: inst.consoleLogLevel ?? null,
           });
           await new Promise(r => setTimeout(r, 1200));
           const s = await invoke<{ status: Status; error?: string }>('wait_for_exit', { id: inst.id });
@@ -515,6 +516,7 @@ export default function App() {
           desired_state: running ? 'stopped' : 'running',
           remote_manage_enabled: current.remoteManageEnabled ?? false,
           rpc_whitelist_cidrs: current.rpcWhitelistCidrs ?? [],
+          console_log_level: current.consoleLogLevel ?? null,
         });
         await serviceRequest(running ? 'stop_instance' : 'start_instance', { instance_id: current.id });
         if (running) invoke('drop_status_endpoint', { port: current.rpcPort }).catch(() => undefined);
@@ -547,6 +549,7 @@ export default function App() {
           rpcPortal: `127.0.0.1:${current.rpcPort}`,
           remoteManageEnabled: current.remoteManageEnabled ?? false,
           rpcWhitelistCidrs: current.rpcWhitelistCidrs ?? [],
+          consoleLogLevel: current.consoleLogLevel ?? null,
         });
         await new Promise(r => setTimeout(r, 1200));
         const s = await invoke<{ status: Status; error?: string }>('wait_for_exit', { id: current.id });
@@ -561,6 +564,63 @@ export default function App() {
       invoke('get_instance_state', { id: current.id }).catch(() => undefined);
     }
   }, [current, instances, kernelUpdate, serviceMode, isElevated, addLog, clearInstanceTraffic, refreshService, setInstances]);
+
+  // 调整 easytier-core 控制台日志级别：--console-log-level 是启动参数，运行中的实例必须重启才生效
+  const changeConsoleLogLevel = useCallback(
+    async (level: string | undefined) => {
+      if (!current) return;
+      if ((current.consoleLogLevel ?? undefined) === level) return;
+      const running = current.status === 'running';
+      if (running) {
+        const ok = await appConfirm(
+          `调整内核日志级别需要短暂重启网络「${current.name}」，期间会断线数秒。继续吗？`
+        );
+        if (!ok) return;
+      }
+      setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, consoleLogLevel: level } : i)));
+      try {
+        if (serviceMode) {
+          await serviceRequest('sync_instance', {
+            instance_id: current.id,
+            name: current.name,
+            config_toml: encodeTOML(current.config),
+            rpc_port: current.rpcPort,
+            auto_start: current.autoStart ?? false,
+            desired_state: running ? 'running' : 'stopped',
+            remote_manage_enabled: current.remoteManageEnabled ?? false,
+            rpc_whitelist_cidrs: current.rpcWhitelistCidrs ?? [],
+            console_log_level: level ?? null,
+          });
+          if (running) {
+            await serviceRequest('stop_instance', { instance_id: current.id });
+            await serviceRequest('start_instance', { instance_id: current.id });
+            setTimeout(() => void refreshService(), 800);
+          }
+          await refreshService();
+        } else if (running) {
+          await invoke('stop_instance', { id: current.id });
+          invoke('drop_status_endpoint', { port: current.rpcPort }).catch(() => undefined);
+          await invoke('start_instance', {
+            id: current.id,
+            config: encodeTOML(current.config),
+            rpcPortal: `127.0.0.1:${current.rpcPort}`,
+            remoteManageEnabled: current.remoteManageEnabled ?? false,
+            rpcWhitelistCidrs: current.rpcWhitelistCidrs ?? [],
+            consoleLogLevel: level ?? null,
+          });
+          await new Promise(r => setTimeout(r, 1200));
+          const s = await invoke<{ status: Status; error?: string }>('wait_for_exit', { id: current.id });
+          if (s.status === 'failed') throw new Error(s.error || 'core 进程启动失败');
+          setInstances(xs => xs.map(i => (i.id === current.id ? { ...i, status: 'running' } : i)));
+        }
+        addLog(`[${current.name}] 内核日志级别已设为 ${level ?? '默认(info)'}`);
+      } catch (e) {
+        addLog(`[${current.name}] 调整内核日志级别失败：${String(e)}`);
+        await appAlert(`调整内核日志级别失败：${String(e)}`);
+      }
+    },
+    [current, serviceMode, addLog, refreshService, setInstances]
+  );
 
   // System Tray & Power Events
   useEffect(() => {
@@ -612,6 +672,7 @@ export default function App() {
                   rpcPortal: inst.remoteManageEnabled ? undefined : `127.0.0.1:${inst.rpcPort}`,
                   remoteManageEnabled: inst.remoteManageEnabled ?? false,
                   rpcWhitelistCidrs: inst.rpcWhitelistCidrs ?? [],
+                  consoleLogLevel: inst.consoleLogLevel ?? null,
                 }).catch(() => {});
               }
             }).catch(() => {});
@@ -752,6 +813,7 @@ export default function App() {
               serviceMode={serviceMode}
               refreshSecs={refreshSecs}
               isWindowVisible={isWindowVisible}
+              onChangeLogLevel={changeConsoleLogLevel}
             />
           )}
 
