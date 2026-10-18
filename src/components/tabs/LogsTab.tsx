@@ -109,9 +109,19 @@ export const LogsTab: React.FC<LogsTabProps> = ({
   const [logView, setLogView] = useState<'runtime' | 'network'>('runtime');
   const [networkLogs, setNetworkLogs] = useState<string[]>([]);
   const [levelFilter, setLevelFilter] = useState<LogLevel>('ALL');
+  const [logFetchError, setLogFetchError] = useState<string | null>(null);
   const logTimer = useRef<number | null>(null);
 
-  const clearNetworkLogs = () => setNetworkLogs([]);
+  const clearNetworkLogs = () => {
+    setNetworkLogs([]);
+    if (current?.status !== 'running') return;
+    // Also drop the backend buffer: it keeps up to MAX_LOG_BYTES of old text,
+    // and the next poll would restore everything a local clear removed.
+    const clear = serviceMode
+      ? serviceRequest('clear_network_logs', { instance_id: current.id })
+      : invoke('clear_network_logs', { id: current.id });
+    clear.catch(() => undefined);
+  };
 
   useEffect(() => {
     if (current?.status !== 'running' || !isWindowVisible) {
@@ -127,8 +137,9 @@ export const LogsTab: React.FC<LogsTabProps> = ({
           : await invoke<string[] | string>('get_network_logs', { id: current.id });
         if (!alive) return;
         setNetworkLogs(normalizeNetworkLogs(value));
-      } catch {
-        /* log bridge may be temporarily unavailable */
+        setLogFetchError(null);
+      } catch (e) {
+        if (alive) setLogFetchError(String(e));
       } finally {
         if (alive) timer = window.setTimeout(() => void refresh(), refreshSecs * 1000);
       }
@@ -139,6 +150,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({
       if (timer != null) window.clearTimeout(timer);
     };
   }, [current?.id, current?.status, serviceMode, refreshSecs, isWindowVisible]);
+
 
   const levelCounts = React.useMemo(() => {
     const counts: Record<LogLevel, number> = { ALL: networkLogs.length, INFO: 0, WARN: 0, ERROR: 0, DEBUG: 0 };
@@ -229,6 +241,11 @@ export const LogsTab: React.FC<LogsTabProps> = ({
           if (el && logTimer.current == null) el.scrollTop = el.scrollHeight;
         }}
       >
+        {logView === 'network' && logFetchError && (
+          <div className="log-line log-text-error">
+            组网日志获取失败：{logFetchError}（{refreshSecs} 秒后自动重试）
+          </div>
+        )}
         {activeLogItems.length === 0 ? (
           <p className="list-empty">
             暂无{logView === 'runtime' ? '运行' : levelFilter === 'ALL' ? '组网' : `${levelFilter} 级别组网`}日志

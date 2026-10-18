@@ -266,14 +266,27 @@ fn get_instance_state(
 #[tauri::command]
 fn get_network_logs(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> NetworkLogs {
     let p = state.lock().unwrap();
+    let (text, truncated) = p
+        .logs
+        .get(&id)
+        .map(|log| log.lock().unwrap().tail(runtime_manager::LOG_TAIL_MAX_BYTES))
+        .unwrap_or_default();
     NetworkLogs {
         instance_id: id.clone(),
-        text: p
-            .logs
-            .get(&id)
-            .map(|log| log.lock().unwrap().text())
-            .unwrap_or_default(),
+        text: if truncated {
+            format!("[更早日志已截断，仅显示最近部分]\n{text}")
+        } else {
+            text
+        },
     }
+}
+#[tauri::command]
+fn clear_network_logs(id: String, state: tauri::State<'_, Mutex<RuntimeProcesses>>) -> Result<(), String> {
+    let p = state.lock().map_err(|_| "runtime state unavailable".to_string())?;
+    if let Some(log) = p.logs.get(&id) {
+        log.lock().map_err(|_| "log state unavailable".to_string())?.clear();
+    }
+    Ok(())
 }
 #[tauri::command]
 fn start_instance(
@@ -2076,6 +2089,7 @@ pub fn run() {
             detect_runtime,
             get_instance_state,
             get_network_logs,
+            clear_network_logs,
             is_elevated,
             restart_as_admin,
             start_instance,

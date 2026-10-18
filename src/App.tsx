@@ -363,8 +363,16 @@ export default function App() {
 
       recordPollResults(results);
 
-      // Status tab uses adaptive 1-2s sampling for smooth rate area chart; other tabs use refreshSecs
-      const delay = tab === 'status' ? Math.min(refreshSecs, 2) * 1000 : refreshSecs * 1000;
+      // Right after start the core answers the portal before the instance is
+      // registered (node == null). Poll that pending window at 1s so peers
+      // appear as soon as the first tunnel is up, instead of after a full
+      // refreshSecs tick. Status tab keeps its adaptive 1-2s sampling.
+      const anyPending = results.some(([, snapshot]) => snapshot !== null && snapshot.node == null);
+      const delay = anyPending
+        ? 1000
+        : tab === 'status'
+          ? Math.min(refreshSecs, 2) * 1000
+          : refreshSecs * 1000;
       if (alive) {
         timer = window.setTimeout(() => void refresh(), delay);
       }

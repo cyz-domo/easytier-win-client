@@ -11,6 +11,11 @@ use std::{
 };
 
 pub const MAX_LOG_BYTES: usize = 2 * 1024 * 1024;
+/// Upper bound for the log text handed to one IPC response. Must stay well
+/// under ipc::MAX_MESSAGE (1 MB): JSON escaping roughly doubles `\n`/`\r`
+/// bytes, so 512 KB of raw text serializes to ~1 MB and would trip the
+/// write_response size check, silently closing the connection.
+pub const LOG_TAIL_MAX_BYTES: usize = 384 * 1024;
 
 #[derive(Debug, Default)]
 pub struct LogBuffer {
@@ -30,6 +35,26 @@ impl LogBuffer {
     }
     pub fn text(&self) -> String {
         self.text.clone()
+    }
+    /// Last at most `max_bytes` of the buffer, starting on a line boundary.
+    /// Returns (text, truncated) — truncated means older lines were dropped.
+    pub fn tail(&self, max_bytes: usize) -> (String, bool) {
+        if self.text.len() <= max_bytes {
+            return (self.text.clone(), false);
+        }
+        let mut start = self.text.len() - max_bytes;
+        while start < self.text.len() && !self.text.is_char_boundary(start) {
+            start += 1;
+        }
+        // Drop the partial first line so the panel never renders half a log line.
+        let cut = match self.text[start..].find('\n') {
+            Some(offset) => start + offset + 1,
+            None => start,
+        };
+        (self.text[cut..].to_string(), true)
+    }
+    pub fn clear(&mut self) {
+        self.text.clear();
     }
 }
 
@@ -207,6 +232,25 @@ impl RuntimeManager {
             .get(id)
             .map(|log| log.lock().unwrap().text())
             .unwrap_or_default()
+    }
+    /// IPC-safe view of an instance's logs: the recent tail plus a truncation
+    /// marker, always small enough for one MAX_MESSAGE-sized response.
+    pub fn logs_tail(&self, id: &str) -> String {
+        let (text, truncated) = self
+            .logs
+            .get(id)
+            .map(|log| log.lock().unwrap().tail(LOG_TAIL_MAX_BYTES))
+            .unwrap_or_default();
+        if truncated {
+            format!("[更早日志已截断，仅显示最近部分]\n{text}")
+        } else {
+            text
+        }
+    }
+    pub fn clear_logs(&self, id: &str) {
+        if let Some(log) = self.logs.get(id) {
+            log.lock().unwrap().clear();
+        }
     }
     pub fn start(&mut self, cfg: &InstanceConfig) -> Result<InstanceSnapshot, String> {
         if self.instance_running(&cfg.id) {

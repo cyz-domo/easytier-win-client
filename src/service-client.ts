@@ -15,7 +15,8 @@ export type ServiceCommand =
   | 'install_service'
   | 'start_service'
   | 'repair_service'
-  | 'get_network_logs';
+  | 'get_network_logs'
+  | 'clear_network_logs';
 
 export interface ServiceRequest<T = Record<string, unknown>> {
   protocol_version: 1;

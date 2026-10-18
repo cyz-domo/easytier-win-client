@@ -629,7 +629,19 @@ mod windows_service {
                 if !s.instances.iter().any(|c| c.id == id) {
                     return Err(("instance_not_found", "instance not found".into()));
                 }
-                Ok(serde_json::json!({"instance_id": id, "text": runtime.lock().unwrap().logs(id)}))
+                Ok(serde_json::json!({"instance_id": id, "text": runtime.lock().unwrap().logs_tail(id)}))
+            }
+            "clear_network_logs" => {
+                let id = req
+                    .payload
+                    .get("instance_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or(("invalid_request", "missing instance_id".into()))?;
+                if !s.instances.iter().any(|c| c.id == id) {
+                    return Err(("instance_not_found", "instance not found".into()));
+                }
+                runtime.lock().unwrap().clear_logs(id);
+                Ok(serde_json::json!({"instance_id": id, "cleared": true}))
             }
             "sync_instance" => {
                 let mut payload = req.payload.clone();
