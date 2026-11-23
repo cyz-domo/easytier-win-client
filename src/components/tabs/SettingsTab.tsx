@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { serviceRequest } from '../../service-client';
 import { appAlert } from '../../dialogs';
 import {
@@ -9,6 +10,9 @@ import {
   KernelUpdateProgress,
   KERNEL_PHASE_TEXT,
   KERNEL_PROXIES,
+  LOCAL_PROXY_PREFIX,
+  LocalProxy,
+  isLocalProxyValue,
   runtimeInfo,
 } from '../../types';
 import { ServiceStatus } from '../../service-client';
@@ -31,6 +35,8 @@ interface SettingsTabProps {
   setKernelProxy: (proxy: string) => void;
   customKernelProxy: string;
   setCustomKernelProxy: (url: string) => void;
+  localProxies: LocalProxy[];
+  refreshLocalProxies: () => Promise<void>;
   availableKernelVersions: string[];
   selectedKernelVersion: string;
   setSelectedKernelVersion: (ver: string) => void;
@@ -66,6 +72,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   setKernelProxy,
   customKernelProxy,
   setCustomKernelProxy,
+  localProxies,
+  refreshLocalProxies,
   availableKernelVersions,
   selectedKernelVersion,
   setSelectedKernelVersion,
@@ -86,6 +94,18 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const isCurrentVersion = Boolean(
     currentVerNormalized && targetVerNormalized && currentVerNormalized === targetVerNormalized
   );
+  const proxyLocked = !!kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase);
+  const mirrorProxies = KERNEL_PROXIES.filter(p => p.value !== 'direct' && p.value !== 'custom');
+  const savedLocalProxy = isLocalProxyValue(kernelProxy) ? kernelProxy.slice(LOCAL_PROXY_PREFIX.length) : '';
+  const localProxyValues = localProxies.map(p => `${LOCAL_PROXY_PREFIX}${p.addr}`);
+  const hasSavedLocalProxy = savedLocalProxy !== '' && !localProxyValues.includes(kernelProxy);
+
+  const [appVersion, setAppVersion] = useState('');
+  useEffect(() => {
+    void getVersion()
+      .then(setAppVersion)
+      .catch(() => {});
+  }, []);
 
   return (
     <>
@@ -209,14 +229,36 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               className="field-input"
               value={kernelProxy}
               onChange={e => setKernelProxy(e.target.value)}
-              disabled={!!kernelUpdate && !['completed', 'failed', 'cancelled'].includes(kernelUpdate.phase)}
+              disabled={proxyLocked}
             >
-              {KERNEL_PROXIES.map(p => (
-                <option value={p.value} key={p.value}>
-                  {p.label}
-                </option>
-              ))}
+              <option value="direct">直连 (GitHub 官方)</option>
+              {(localProxies.length > 0 || hasSavedLocalProxy) && (
+                <optgroup label="本地代理（已检测 · 无需 TUN）">
+                  {localProxies.map(p => (
+                    <option value={`${LOCAL_PROXY_PREFIX}${p.addr}`} key={p.addr}>
+                      {p.label} · {p.addr}
+                    </option>
+                  ))}
+                  {hasSavedLocalProxy && (
+                    <option value={kernelProxy}>已保存的本地代理 · {savedLocalProxy}</option>
+                  )}
+                </optgroup>
+              )}
+              <optgroup label="GitHub 加速镜像">
+                {mirrorProxies.map(p => (
+                  <option value={p.value} key={p.value}>
+                    {p.label}
+                  </option>
+                ))}
+              </optgroup>
+              <option value="custom">自定义镜像前缀...</option>
             </select>
+            {isLocalProxyValue(kernelProxy) && (
+              <span className="hint-inline">直接经本地 HTTP 代理访问 GitHub，无需开启 TUN 模式。</span>
+            )}
+            {localProxies.length === 0 && !isLocalProxyValue(kernelProxy) && (
+              <span className="hint-inline">未检测到本地代理，可点击下方「检测本地代理」。</span>
+            )}
           </label>
           {kernelProxy === 'custom' && (
             <label className="field" style={{ minWidth: 260 }}>
@@ -255,6 +297,9 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             </select>
           </label>
           <div className="kernel-update-actions">
+            <button className="ghost" onClick={() => void refreshLocalProxies()} disabled={isUpdatingKernel}>
+              检测本地代理
+            </button>
             <button
               className="ghost"
               onClick={() => void checkKernelUpdate()}
@@ -495,7 +540,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
       <div className="card">
         <h3 className="card-title">关于</h3>
-        <p className="hint">EasyTier Windows Client 0.1.0 · Tauri 2 + React · 设计文档见仓库 docs/ 目录。</p>
+        <p className="hint">EasyTier Windows Client {appVersion ? `v${appVersion}` : ''} · Tauri 2 + React · 设计文档见仓库 docs/ 目录。</p>
         <label className="toggle-row">
           <span className="field-label">显示密钥（导出时提醒）</span>
           <button

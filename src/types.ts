@@ -102,6 +102,15 @@ export const KERNEL_PROXIES = [
   { value: 'custom', label: '自定义镜像/代理前缀...' },
 ];
 
+export interface LocalProxy {
+  addr: string;
+  label: string;
+  source: string;
+}
+
+export const LOCAL_PROXY_PREFIX = 'local:';
+export const isLocalProxyValue = (value: string): boolean => value.startsWith(LOCAL_PROXY_PREFIX);
+
 export type ServiceRecoveryStep = 'starting' | 'waiting' | 'syncing';
 export const SERVICE_RECOVERY_TEXT: Record<ServiceRecoveryStep, string> = {
   starting: '正在重新拉起后台服务…',

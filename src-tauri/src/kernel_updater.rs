@@ -5,7 +5,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter};
 use zip::ZipArchive;
@@ -103,9 +103,35 @@ fn release_version(tag: &str) -> String {
     tag.strip_prefix('v').unwrap_or(tag).to_string()
 }
 
+/// A local forward proxy (Clash/v2rayN/etc.) is expressed as `local:host:port`
+/// so it stays distinguishable from a GitHub mirror prefix in the same string
+/// IPC field. Mirrors prepend their URL; local proxies configure reqwest.
+fn local_proxy_addr(proxy: &str) -> Option<String> {
+    proxy
+        .trim()
+        .strip_prefix("local:")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn build_client(proxy: &str, timeout: Duration) -> Result<Client, String> {
+    let mut builder = Client::builder().timeout(timeout);
+    if let Some(addr) = local_proxy_addr(proxy) {
+        let url = if addr.contains("://") {
+            addr
+        } else {
+            format!("http://{addr}")
+        };
+        let parsed = reqwest::Url::parse(&url).map_err(|e| format!("本地代理地址无效：{e}"))?;
+        let forward = reqwest::Proxy::all(parsed).map_err(|e| format!("本地代理地址无效：{e}"))?;
+        builder = builder.proxy(forward);
+    }
+    builder.build().map_err(|e| e.to_string())
+}
+
 pub fn build_download_url(proxy: &str, raw: &str) -> Result<String, String> {
     let proxy = proxy.trim().trim_end_matches('/');
-    if proxy.is_empty() || proxy == "direct" {
+    if proxy.is_empty() || proxy == "direct" || local_proxy_addr(proxy).is_some() {
         return Ok(raw.to_string());
     }
     let parsed = reqwest::Url::parse(proxy).map_err(|e| format!("代理地址无效：{e}"))?;
@@ -169,10 +195,7 @@ pub fn fetch_release_by_tag(client: &Client, proxy: &str, tag: &str) -> Result<R
 }
 
 pub fn list_available_versions(proxy: &str) -> Result<Vec<String>, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = build_client(proxy, Duration::from_secs(15))?;
     let api = build_download_url(
         proxy,
         &format!("https://api.github.com/repos/{OWNER}/{REPO}/releases?per_page=25"),
@@ -200,6 +223,187 @@ pub fn list_available_versions(proxy: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(versions)
+}
+
+#[derive(Clone, Serialize)]
+pub struct LocalProxy {
+    pub addr: String,
+    pub label: String,
+    pub source: String,
+}
+
+/// Ports where common Windows proxy clients expose an HTTP proxy.
+const COMMON_PROXY_PORTS: &[(u16, &str)] = &[
+    (7890, "Clash / Mihomo"),
+    (7897, "Clash Verge"),
+    (10809, "v2rayN"),
+    (1087, "v2rayN"),
+    (8080, "HTTP 代理"),
+    (3128, "Squid"),
+];
+
+/// Best-effort scan for a proxy already listening on this machine so kernel
+/// updates can go through it instead of requiring TUN mode. Only liveness of
+/// well-known HTTP proxy ports (plus the configured system proxy) is checked;
+/// no traffic is sent.
+pub fn detect_local_proxies() -> Vec<LocalProxy> {
+    let mut found: Vec<LocalProxy> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    #[cfg(windows)]
+    {
+        if let Some(addr) = sysproxy::read_system_proxy() {
+            if tcp_alive(&addr) && seen.insert(addr.clone()) {
+                found.push(LocalProxy {
+                    addr,
+                    label: "系统代理".into(),
+                    source: "system".into(),
+                });
+            }
+        }
+    }
+
+    for (port, label) in COMMON_PROXY_PORTS {
+        let addr = format!("127.0.0.1:{port}");
+        if !seen.contains(&addr) && tcp_alive(&addr) {
+            seen.insert(addr.clone());
+            found.push(LocalProxy {
+                addr,
+                label: (*label).into(),
+                source: "port".into(),
+            });
+        }
+    }
+    found
+}
+
+fn tcp_alive(addr: &str) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let Ok(mut targets) = addr.to_socket_addrs() else {
+        return false;
+    };
+    let Some(target) = targets.next() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&target, Duration::from_millis(300)).is_ok()
+}
+
+#[cfg(windows)]
+mod sysproxy {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD,
+    };
+
+    struct KeyGuard(HKEY);
+
+    impl Drop for KeyGuard {
+        fn drop(&mut self) {
+            if self.0 != 0 {
+                unsafe { RegCloseKey(self.0) };
+            }
+        }
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    pub fn read_system_proxy() -> Option<String> {
+        let subkey = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings");
+        let mut hkey: HKEY = 0;
+        if unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) }
+            != ERROR_SUCCESS
+        {
+            return None;
+        }
+        let _guard = KeyGuard(hkey);
+
+        if query_dword(hkey, "ProxyEnable").unwrap_or(0) == 0 {
+            return None;
+        }
+        parse_proxy_server(&query_string(hkey, "ProxyServer")?)
+    }
+
+    fn query_dword(hkey: HKEY, name: &str) -> Option<u32> {
+        let name = wide(name);
+        let mut value: u32 = 0;
+        let mut kind: u32 = 0;
+        let mut len: u32 = std::mem::size_of::<u32>() as u32;
+        let rc = unsafe {
+            RegQueryValueExW(
+                hkey,
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut kind,
+                &mut value as *mut u32 as *mut u8,
+                &mut len,
+            )
+        };
+        (rc == ERROR_SUCCESS && kind == REG_DWORD).then_some(value)
+    }
+
+    fn query_string(hkey: HKEY, name: &str) -> Option<String> {
+        let name = wide(name);
+        let mut kind: u32 = 0;
+        let mut len: u32 = 0;
+        let rc = unsafe {
+            RegQueryValueExW(
+                hkey,
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut kind,
+                std::ptr::null_mut(),
+                &mut len,
+            )
+        };
+        if rc != ERROR_SUCCESS || len == 0 {
+            return None;
+        }
+        let mut buf: Vec<u16> = vec![0; (len as usize / 2) + 1];
+        let rc = unsafe {
+            RegQueryValueExW(
+                hkey,
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut kind,
+                buf.as_mut_ptr() as *mut u8,
+                &mut len,
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            return None;
+        }
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        let raw = String::from_utf16_lossy(&buf[..end]);
+        let raw = raw.trim();
+        (!raw.is_empty()).then(|| raw.to_string())
+    }
+
+    /// ProxyServer is either `host:port` or `http=h:p;https=h:p;socks=h:p`.
+    fn parse_proxy_server(raw: &str) -> Option<String> {
+        for part in raw.split(';') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let (scheme, value) = match part.split_once('=') {
+                Some((scheme, value)) => (scheme.trim().to_ascii_lowercase(), value.trim()),
+                None => ("http".to_string(), part),
+            };
+            if !matches!(scheme.as_str(), "http" | "https") || value.is_empty() {
+                continue;
+            }
+            let addr = value
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .trim_end_matches('/');
+            if !addr.is_empty() {
+                return Some(addr.to_string());
+            }
+        }
+        None
+    }
 }
 
 pub fn detect_current_version(core_path: Option<&Path>) -> String {
@@ -230,10 +434,7 @@ pub fn detect_current_version(core_path: Option<&Path>) -> String {
 }
 
 pub fn check(proxy: &str, core_path: Option<&Path>) -> Result<KernelUpdateInfo, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = build_client(proxy, Duration::from_secs(15))?;
     let release = fetch_release(&client, proxy)?;
     if release.draft || release.prerelease {
         return Err("GitHub 最新版本不是正式 Release".into());
@@ -342,10 +543,7 @@ where
     F: FnMut(&str, String, u64, Option<u64>, Option<String>, Option<String>),
 {
     reset_cancel();
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = build_client(proxy, Duration::from_secs(30))?;
     progress(
         "checking",
         "正在获取内核版本信息".into(),
@@ -513,36 +711,167 @@ pub fn install(runtime_dir: &Path, staged: &Path) -> Result<PathBuf, String> {
     if !runtime_dir.exists() {
         fs::create_dir_all(runtime_dir).map_err(|e| format!("创建 core 目录失败: {e}"))?;
     }
-    let entries = fs::read_dir(staged).map_err(|e| format!("读取 staged 目录失败: {e}"))?;
-    for entry in entries.flatten() {
+    let entries: Vec<_> = fs::read_dir(staged)
+        .map_err(|e| format!("读取 staged 目录失败: {e}"))?
+        .flatten()
+        .collect();
+
+    let mut released_locks = false;
+    for entry in entries {
         let file_name = entry.file_name();
+        let src = entry.path();
         let dest = runtime_dir.join(&file_name);
-        let mut copied = false;
+
+        // Driver files such as WinDivert64.sys are usually byte-identical across
+        // releases, and a loaded driver keeps its .sys mapped. Leaving an
+        // identical file untouched side-steps that lock entirely.
+        if files_identical(&src, &dest) {
+            continue;
+        }
+
+        let mut copied = fs::copy(&src, &dest).is_ok();
         for _ in 0..5 {
-            if fs::copy(entry.path(), &dest).is_ok() {
-                copied = true;
+            if copied {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(200));
+            copied = fs::copy(&src, &dest).is_ok();
+        }
+        if !copied && !released_locks {
+            // Managed cores were already stopped by the caller, so anything
+            // still holding the file is an orphan core or the WinDivert kernel
+            // driver. Release both and wait for the driver to unload.
+            release_runtime_locks();
+            released_locks = true;
+            copied = copy_until_released(&src, &dest, Duration::from_secs(5));
         }
         if !copied {
-            // Restore from backup on failure
-            if backup.exists() {
-                if let Ok(b_entries) = fs::read_dir(&backup) {
-                    for b_entry in b_entries.flatten() {
-                        let _ = fs::copy(b_entry.path(), runtime_dir.join(b_entry.file_name()));
-                    }
-                }
+            // Last resort, mirroring the installer: move the locked file aside
+            // so the new one can land; the stale .old is pruned afterwards.
+            let aside = runtime_dir.join(format!(
+                "{}.old.{}",
+                file_name.to_string_lossy(),
+                chrono_like_timestamp()
+            ));
+            if fs::rename(&dest, &aside).is_ok() && fs::copy(&src, &dest).is_ok() {
+                copied = true;
             }
+        }
+        if !copied {
+            restore_backup(runtime_dir, &backup);
             return Err(format!("覆盖核心文件 {:?} 失败：旧进程可能仍在占用该文件", file_name));
         }
     }
+
+    prune_stale_old_files(runtime_dir);
 
     // Automatically prune old backup folders (keep only 1 latest)
     cleanup_old_backups(parent, 1);
 
     Ok(backup)
 }
+
+fn files_identical(a: &Path, b: &Path) -> bool {
+    let (Ok(meta_a), Ok(meta_b)) = (fs::metadata(a), fs::metadata(b)) else {
+        return false;
+    };
+    if meta_a.len() != meta_b.len() {
+        return false;
+    }
+    let (Ok(file_a), Ok(file_b)) = (fs::File::open(a), fs::File::open(b)) else {
+        return false;
+    };
+    let mut reader_a = std::io::BufReader::new(file_a);
+    let mut reader_b = std::io::BufReader::new(file_b);
+    let mut buf_a = [0u8; 64 * 1024];
+    let mut buf_b = [0u8; 64 * 1024];
+    loop {
+        let read_a = match reader_a.read(&mut buf_a) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        let read_b = match reader_b.read(&mut buf_b) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if read_a != read_b || buf_a[..read_a] != buf_b[..read_b] {
+            return false;
+        }
+        if read_a == 0 {
+            return true;
+        }
+    }
+}
+
+fn copy_until_released(src: &Path, dest: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if fs::copy(src, dest).is_ok() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn restore_backup(runtime_dir: &Path, backup: &Path) {
+    if let Ok(entries) = fs::read_dir(backup) {
+        for entry in entries.flatten() {
+            let _ = fs::copy(entry.path(), runtime_dir.join(entry.file_name()));
+        }
+    }
+}
+
+fn prune_stale_old_files(runtime_dir: &Path) {
+    if let Ok(entries) = fs::read_dir(runtime_dir) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().contains(".old.") {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Stop lingering cores and the WinDivert kernel driver so its mapped .sys can
+/// be replaced without a reboot. Mirrors the installer's pre-install sweep.
+#[cfg(windows)]
+fn release_runtime_locks() {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    for image in ["easytier-core.exe", "easytier-cli.exe"] {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/IM", image])
+            .creation_flags(0x08000000)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    std::thread::sleep(Duration::from_millis(300));
+
+    for name in ["WinDivert", "WinDivert14", "WinDivert22"] {
+        let _ = Command::new("sc.exe")
+            .args(["stop", name])
+            .creation_flags(0x08000000)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    for name in ["WinDivert", "WinDivert14", "WinDivert22"] {
+        let _ = Command::new("sc.exe")
+            .args(["delete", name])
+            .creation_flags(0x08000000)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    std::thread::sleep(Duration::from_millis(500));
+}
+
+#[cfg(not(windows))]
+fn release_runtime_locks() {}
 
 fn chrono_like_timestamp() -> String {
     std::time::SystemTime::now()
@@ -568,6 +897,18 @@ mod tests {
             build_download_url("direct", "https://github.com/a.zip").unwrap(),
             "https://github.com/a.zip"
         );
+    }
+    #[test]
+    fn local_proxy_keeps_url_direct() {
+        assert_eq!(
+            build_download_url("local:127.0.0.1:7890", "https://github.com/a.zip").unwrap(),
+            "https://github.com/a.zip"
+        );
+        assert_eq!(
+            local_proxy_addr(" local: 127.0.0.1:7890 ").as_deref(),
+            Some("127.0.0.1:7890")
+        );
+        assert!(local_proxy_addr("https://ghfast.top").is_none());
     }
     #[test]
     fn version_strips_v() {

@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import { getVersion } from '@tauri-apps/api/app';
 import easytierLogo from '../../assets/easytier-logo.png';
 import { IconGear, IconPlus } from '../../icons';
 import { Instance, Tab, runtimeInfo } from '../../types';
@@ -22,6 +23,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
   addInstance,
   runtime,
 }) => {
+  const [clientVersion, setClientVersion] = useState('');
+  useEffect(() => {
+    void getVersion()
+      .then(setClientVersion)
+      .catch(() => {});
+  }, []);
+
   return (
     <aside>
       <div className="brand">
@@ -71,7 +79,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <span className="version-row">
             核心版本：{runtime?.version ? runtime.version.split(' ').pop() : '未检测'}
           </span>
-          <span className="version-row">客户端版本：v0.1.0</span>
+          <span className="version-row">客户端版本：{clientVersion ? `v${clientVersion}` : '—'}</span>
         </div>
       </div>
     </aside>

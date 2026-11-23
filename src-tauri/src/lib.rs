@@ -515,6 +515,13 @@ async fn list_kernel_versions(proxy: Option<String>) -> Result<Vec<String>, Stri
 }
 
 #[tauri::command]
+async fn detect_local_proxies() -> Vec<kernel_updater::LocalProxy> {
+    tokio::task::spawn_blocking(kernel_updater::detect_local_proxies)
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
 fn cancel_kernel_update() {
     kernel_updater::cancel_update();
 }
@@ -2105,6 +2112,7 @@ pub fn run() {
             wait_for_exit,
             check_kernel_update,
             list_kernel_versions,
+            detect_local_proxies,
             update_kernel,
             cancel_kernel_update,
             update_tray_status,

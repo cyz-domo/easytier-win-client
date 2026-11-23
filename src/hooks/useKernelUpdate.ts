@@ -13,6 +13,7 @@ import {
   isKernelTerminal,
   kernelErrorText,
   mergeKernelProgress,
+  LocalProxy,
   load,
 } from '../types';
 
@@ -30,6 +31,22 @@ export function useKernelUpdate(
   const [selectedKernelVersion, setSelectedKernelVersion] = useState<string>('');
   const [kernelProxy, setKernelProxy] = useState<string>(() => load('easytier.kernel-update-proxy.v1', 'direct'));
   const [customKernelProxy, setCustomKernelProxy] = useState<string>(() => load('easytier.custom-kernel-proxy.v1', ''));
+  const [localProxies, setLocalProxies] = useState<LocalProxy[]>([]);
+
+  const refreshLocalProxies = useCallback(async () => {
+    try {
+      setLocalProxies(await invoke<LocalProxy[]>('detect_local_proxies'));
+    } catch {
+      setLocalProxies([]);
+    }
+  }, []);
+
+  const proxyScannedRef = useRef(false);
+  useEffect(() => {
+    if (tab !== 'settings' || proxyScannedRef.current) return;
+    proxyScannedRef.current = true;
+    void refreshLocalProxies();
+  }, [tab, refreshLocalProxies]);
 
   useEffect(() => {
     localStorage.setItem('easytier.custom-kernel-proxy.v1', customKernelProxy);
@@ -133,7 +150,7 @@ export function useKernelUpdate(
   useEffect(() => {
     if (tab !== 'settings' || kernelCheckedRef.current) return;
     kernelCheckedRef.current = true;
-    void invoke<KernelUpdateInfo>('check_kernel_update', { proxy: kernelProxy })
+    void invoke<KernelUpdateInfo>('check_kernel_update', { proxy: effectiveKernelProxy })
       .then(info => {
         setKernelInfo(info);
         if (info.available_versions && info.available_versions.length > 0) {
@@ -144,7 +161,7 @@ export function useKernelUpdate(
       .catch(e =>
         setKernelInfo({ current_version: runtimeVersion ?? 'unknown', update_available: false, error: String(e) })
       );
-  }, [tab, kernelProxy, runtimeVersion]);
+  }, [tab, effectiveKernelProxy, runtimeVersion]);
 
   const cancelKernelUpdate = useCallback(async () => {
     try {
@@ -307,6 +324,8 @@ export function useKernelUpdate(
     customKernelProxy,
     setCustomKernelProxy,
     effectiveKernelProxy,
+    localProxies,
+    refreshLocalProxies,
     checkKernelUpdate,
     switchKernel,
     cancelKernelUpdate,

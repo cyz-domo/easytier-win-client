@@ -203,6 +203,8 @@ export default function App() {
     customKernelProxy,
     setCustomKernelProxy,
     effectiveKernelProxy,
+    localProxies,
+    refreshLocalProxies,
     checkKernelUpdate,
     switchKernel,
     cancelKernelUpdate,
@@ -265,11 +267,21 @@ export default function App() {
   }, []);
 
   // Runtime environment detection
-  useEffect(() => {
+  const refreshRuntime = useCallback(() => {
     invoke<runtimeInfo>('detect_runtime', {})
       .then(v => setRuntime({ ...v, core_path: v.core_path ?? 'core/easytier-core.exe' }))
-      .catch(() => setRuntime(null));
+      .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    refreshRuntime();
+  }, [refreshRuntime]);
+
+  // A kernel switch rewrites the binary; re-read its version so the sidebar
+  // and settings tab stop showing the old one.
+  useEffect(() => {
+    if (kernelUpdate?.phase === 'completed') refreshRuntime();
+  }, [kernelUpdate?.phase, refreshRuntime]);
 
   // UAC elevation check
   useEffect(() => {
@@ -836,6 +848,8 @@ export default function App() {
               setKernelProxy={setKernelProxy}
               customKernelProxy={customKernelProxy}
               setCustomKernelProxy={setCustomKernelProxy}
+              localProxies={localProxies}
+              refreshLocalProxies={refreshLocalProxies}
               availableKernelVersions={availableKernelVersions}
               selectedKernelVersion={selectedKernelVersion}
               setSelectedKernelVersion={setSelectedKernelVersion}
