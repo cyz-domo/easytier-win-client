@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { NetworkConfig, NetworkingMethod, PortForwardConfig } from './network-config';
 import { PublicServerModal } from './components/PublicServerModal';
 import { IconGlobe } from './icons';
@@ -264,24 +265,27 @@ export function ConfigEditor({ config: c, onChange, showAdvanced, onToggleAdvanc
         </>
       )}
 
-      <PublicServerModal
-        isOpen={showPublicModal}
-        onClose={() => setShowPublicModal(false)}
-        selectedAddresses={c.peer_urls}
-        onToggle={addr => {
-          const clean = addr.trim();
-          const exists = c.peer_urls.some(p => p.trim().toLowerCase() === clean.toLowerCase());
-          if (exists) {
-            onChange({
-              peer_urls: c.peer_urls.filter(p => p.trim().toLowerCase() !== clean.toLowerCase()),
-            });
-          } else {
-            onChange({
-              peer_urls: [...c.peer_urls.filter(Boolean), clean],
-            });
-          }
-        }}
-      />
+      {createPortal(
+        <PublicServerModal
+          isOpen={showPublicModal}
+          onClose={() => setShowPublicModal(false)}
+          selectedAddresses={c.peer_urls}
+          onToggle={addr => {
+            const clean = addr.trim();
+            const exists = c.peer_urls.some(p => p.trim().toLowerCase() === clean.toLowerCase());
+            if (exists) {
+              onChange({
+                peer_urls: c.peer_urls.filter(p => p.trim().toLowerCase() !== clean.toLowerCase()),
+              });
+            } else {
+              onChange({
+                peer_urls: [...c.peer_urls.filter(Boolean), clean],
+              });
+            }
+          }}
+        />,
+        document.body
+      )}
     </div>
   );
 }
