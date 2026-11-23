@@ -236,19 +236,35 @@ pub struct LocalProxy {
 const COMMON_PROXY_PORTS: &[(u16, &str)] = &[
     (7890, "Clash / Mihomo"),
     (7897, "Clash Verge"),
-    (10809, "v2rayN"),
+    (10808, "v2rayN（混合端口）"),
+    (10809, "v2rayN（HTTP）"),
     (1087, "v2rayN"),
     (8080, "HTTP 代理"),
     (3128, "Squid"),
 ];
 
-/// Best-effort scan for a proxy already listening on this machine so kernel
-/// updates can go through it instead of requiring TUN mode. Only liveness of
-/// well-known HTTP proxy ports (plus the configured system proxy) is checked;
-/// no traffic is sent.
+/// Process name fragments of common local proxy clients; their listening ports
+/// are discovered dynamically so custom port settings keep working.
+#[cfg(windows)]
+const PROXY_PROCESS_HINTS: &[&str] = &[
+    "v2rayn", "xray", "mihomo", "clash", "sing-box", "singbox", "nekoray", "nekobox",
+    "hysteria",
+];
+
+/// CONNECT handshake only (no TLS, no payload); proxies answer with a status
+/// line immediately, while SOCKS-only or API listeners do not.
+const PROXY_PROBE_REQUEST: &[u8] =
+    b"CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com:443\r\n\r\n";
+
+/// Best-effort scan for a usable local HTTP proxy so kernel updates can go
+/// through it instead of requiring TUN mode. The registry system proxy is
+/// trusted as configured; ports owned by known proxy clients (whatever they
+/// are configured to) and well-known default ports are verified with a CONNECT
+/// handshake to the update host, so SOCKS-only or API listeners are skipped.
 pub fn detect_local_proxies() -> Vec<LocalProxy> {
     let mut found: Vec<LocalProxy> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut rejected: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     #[cfg(windows)]
     {
@@ -261,11 +277,31 @@ pub fn detect_local_proxies() -> Vec<LocalProxy> {
                 });
             }
         }
+
+        for (port, name) in procscan::proxy_listening_ports() {
+            let addr = format!("127.0.0.1:{port}");
+            if seen.contains(&addr) || rejected.contains(&addr) {
+                continue;
+            }
+            if !http_tunnel_ok(&addr) {
+                rejected.insert(addr);
+                continue;
+            }
+            seen.insert(addr.clone());
+            found.push(LocalProxy {
+                addr,
+                label: format!("{name}（进程识别）"),
+                source: "process".into(),
+            });
+        }
     }
 
     for (port, label) in COMMON_PROXY_PORTS {
         let addr = format!("127.0.0.1:{port}");
-        if !seen.contains(&addr) && tcp_alive(&addr) {
+        if seen.contains(&addr) || rejected.contains(&addr) {
+            continue;
+        }
+        if http_tunnel_ok(&addr) {
             seen.insert(addr.clone());
             found.push(LocalProxy {
                 addr,
@@ -277,6 +313,35 @@ pub fn detect_local_proxies() -> Vec<LocalProxy> {
     found
 }
 
+fn http_tunnel_ok(addr: &str) -> bool {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+    let Ok(mut targets) = addr.to_socket_addrs() else {
+        return false;
+    };
+    let Some(target) = targets.next() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&target, Duration::from_millis(300)) else {
+        return false;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    if stream.write_all(PROXY_PROBE_REQUEST).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 12];
+    let mut len = 0;
+    while len < buf.len() {
+        match stream.read(&mut buf[len..]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => len += n,
+        }
+    }
+    let line = String::from_utf8_lossy(&buf[..len]);
+    line.starts_with("HTTP/") && line.contains(" 200")
+}
+
 fn tcp_alive(addr: &str) -> bool {
     use std::net::{TcpStream, ToSocketAddrs};
     let Ok(mut targets) = addr.to_socket_addrs() else {
@@ -286,6 +351,140 @@ fn tcp_alive(addr: &str) -> bool {
         return false;
     };
     TcpStream::connect_timeout(&target, Duration::from_millis(300)).is_ok()
+}
+
+/// Maps listening TCP ports to the owning process so proxy clients are found
+/// regardless of which port they were configured to use.
+#[cfg(windows)]
+mod procscan {
+    use std::collections::{HashMap, HashSet};
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    const AF_INET: u32 = 2;
+
+    fn process_names() -> HashMap<u32, String> {
+        let mut map = HashMap::new();
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return map;
+        }
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+        while ok {
+            let end = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..end]).to_lowercase();
+            map.insert(entry.th32ProcessID, name);
+            ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+        }
+        let _ = unsafe { CloseHandle(snapshot) };
+        map
+    }
+
+    fn listening_ports() -> Vec<(u16, u32)> {
+        // 122 = ERROR_INSUFFICIENT_BUFFER: the table grew between the sizing
+        // call and the read, so retry once with the new size.
+        for _ in 0..2 {
+            let mut size: u32 = 0;
+            unsafe {
+                GetExtendedTcpTable(
+                    std::ptr::null_mut(),
+                    &mut size,
+                    0,
+                    AF_INET,
+                    TCP_TABLE_OWNER_PID_LISTENER,
+                    0,
+                );
+            }
+            if size == 0 {
+                return Vec::new();
+            }
+            let mut buf = vec![0u8; size as usize];
+            let status = unsafe {
+                GetExtendedTcpTable(
+                    buf.as_mut_ptr().cast(),
+                    &mut size,
+                    0,
+                    AF_INET,
+                    TCP_TABLE_OWNER_PID_LISTENER,
+                    0,
+                )
+            };
+            if status == 122 {
+                continue;
+            }
+            if status != 0 {
+                return Vec::new();
+            }
+            let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+            let count = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+            let mut out = Vec::with_capacity(count);
+            for i in 0..count {
+                let offset = 4 + i * row_size;
+                if offset + row_size > buf.len() {
+                    break;
+                }
+                let row = unsafe {
+                    std::ptr::read_unaligned(
+                        buf.as_ptr().add(offset).cast::<MIB_TCPROW_OWNER_PID>(),
+                    )
+                };
+                let port = u16::from_be(row.dwLocalPort as u16);
+                if port != 0 {
+                    out.push((port, row.dwOwningPid));
+                }
+            }
+            return out;
+        }
+        Vec::new()
+    }
+
+    pub fn proxy_listening_ports() -> Vec<(u16, String)> {
+        let names = process_names();
+        let mut seen = HashSet::new();
+        let mut out: Vec<(u16, String)> = Vec::new();
+        for (port, pid) in listening_ports() {
+            let Some(name) = names.get(&pid) else {
+                continue;
+            };
+            if name.ends_with("service.exe") {
+                continue;
+            }
+            let is_proxy = super::PROXY_PROCESS_HINTS.iter().any(|hint| name.contains(hint));
+            if is_proxy && seen.insert(port) {
+                out.push((port, proxy_label(name)));
+            }
+        }
+        out.sort_by_key(|(port, _)| *port);
+        out
+    }
+
+    fn proxy_label(exe: &str) -> String {
+        if exe.contains("xray") || exe.contains("v2ray") {
+            "v2rayN / Xray".into()
+        } else if exe.contains("mihomo") || exe.contains("clash") {
+            "Clash / Mihomo".into()
+        } else if exe.contains("sing-box") || exe.contains("singbox") {
+            "sing-box".into()
+        } else if exe.contains("nekoray") || exe.contains("nekobox") {
+            "NekoRay".into()
+        } else if exe.contains("hysteria") {
+            "Hysteria".into()
+        } else {
+            exe.trim_end_matches(".exe").to_string()
+        }
+    }
 }
 
 #[cfg(windows)]
