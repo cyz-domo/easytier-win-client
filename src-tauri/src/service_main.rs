@@ -326,7 +326,10 @@ mod windows_service {
             let lock3 = update_lock.clone();
             let stopped3 = stopped_for_ipc.clone();
             let logger3 = logger.clone();
-            std::thread::spawn(move || watchdog(state3, runtime3, lock3, stopped3, logger3));
+            let tasks3 = tasks.clone();
+            std::thread::spawn(move || {
+                watchdog(state3, runtime3, lock3, stopped3, logger3, tasks3)
+            });
         }
         let state2 = state.clone();
         let runtime2 = runtime.clone();
@@ -443,6 +446,39 @@ mod windows_service {
     }
 
     const WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_secs(10);
+    const UPDATE_STALL_TIMEOUT_MS: u128 = 180_000;
+
+    /// A blocked update worker can leave its task at a non-terminal phase and
+    /// keep update_lock forever, which also disables the watchdog. Fail the
+    /// task and release the lock once it makes no progress for a long while.
+    fn enforce_update_stall(tasks: &Tasks, update_lock: &Arc<Mutex<bool>>, logger: &ServiceLogger) {
+        let now = task_timestamp();
+        let mut stalled: Option<String> = None;
+        {
+            let mut guard = tasks.lock().unwrap();
+            for task in guard.values_mut() {
+                if matches!(task.phase.as_str(), "completed" | "failed" | "cancelled") {
+                    continue;
+                }
+                if now.saturating_sub(task.updated_at) < UPDATE_STALL_TIMEOUT_MS {
+                    continue;
+                }
+                stalled = Some(format!("{}: {}", task.phase, task.message));
+                task.phase = "failed".into();
+                task.message = "内核更新超时，任务已终止".into();
+                task.error = Some("update stalled".into());
+                task.updated_at = now;
+            }
+        }
+        if let Some(detail) = stalled {
+            *update_lock.lock().unwrap() = false;
+            service_log(
+                logger,
+                "ERROR",
+                format!("kernel update stalled ({detail}); marked failed and released lock"),
+            );
+        }
+    }
     const RESTART_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
     const RESTART_MAX_MISSES: u32 = 8;
     const RESTART_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(600);
@@ -457,6 +493,7 @@ mod windows_service {
         update_lock: Arc<Mutex<bool>>,
         stopped: Arc<Mutex<bool>>,
         logger: ServiceLogger,
+        tasks: Tasks,
     ) {
         use config_store::DesiredState;
         #[derive(Default)]
@@ -468,7 +505,12 @@ mod windows_service {
         let mut track: HashMap<String, Track> = HashMap::new();
         while !*stopped.lock().unwrap() {
             std::thread::sleep(WATCHDOG_TICK);
-            if *stopped.lock().unwrap() || *update_lock.lock().unwrap() {
+            if *stopped.lock().unwrap() {
+                continue;
+            }
+            let update_busy = *update_lock.lock().unwrap();
+            if update_busy {
+                enforce_update_stall(&tasks, &update_lock, &logger);
                 continue;
             }
             let desired: Vec<config_store::InstanceConfig> = {
@@ -898,8 +940,31 @@ mod windows_service {
                 let runtime2 = runtime.clone();
                 let lock2 = update_lock.clone();
                 let id2 = task_id.clone();
+                let logger2 = ServiceLogger::clone(logger);
+                let id3 = task_id.clone();
+                let tasks3 = tasks.clone();
+                let lock3b = update_lock.clone();
+                let logger3 = ServiceLogger::clone(logger);
                 std::thread::spawn(move || {
-                    run_kernel_update(id2, proxy, target_version, state2, runtime2, tasks2, lock2)
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_kernel_update(
+                            id2, proxy, target_version, state2, runtime2, tasks2, lock2, &logger2,
+                        )
+                    }));
+                    if outcome.is_err() {
+                        set_task(
+                            &tasks3,
+                            &id3,
+                            "failed",
+                            "内核更新线程异常退出",
+                            0,
+                            None,
+                            Some("update worker panicked".into()),
+                            None,
+                        );
+                        *lock3b.lock().unwrap() = false;
+                        service_log(&logger3, "ERROR", "kernel update worker panicked");
+                    }
                 });
                 Ok(serde_json::json!({
                     "task_id": task_id,
@@ -962,13 +1027,20 @@ mod windows_service {
         runtime: Arc<Mutex<runtime_manager::RuntimeManager>>,
         tasks: Tasks,
         update_lock: Arc<Mutex<bool>>,
+        logger: &ServiceLogger,
     ) {
         let finish = |phase: &str,
                       message: String,
                       error: Option<String>,
                       result: Option<serde_json::Value>| {
+            let level = if matches!(phase, "failed" | "cancelled") { "ERROR" } else { "INFO" };
+            service_log(logger, level, format!("kernel update finished: {phase} - {message}"));
             set_task(&tasks, &task_id, phase, message, 0, None, error, result);
             *update_lock.lock().unwrap() = false;
+        };
+        let set_phase = |phase: &str, message: &str| {
+            set_task(&tasks, &task_id, phase, message, 0, None, None, None);
+            service_log(logger, "INFO", format!("kernel update: {phase} - {message}"));
         };
         let core = service_core_path();
         let runtime_dir = match core.parent() {
@@ -1021,15 +1093,9 @@ mod windows_service {
             .filter(|c| runtime.lock().unwrap().instance_running(&c.id))
             .cloned()
             .collect();
-        set_task(
-            &tasks,
-            &task_id,
+        set_phase(
             "stopping",
-            "正在停止运行中的网络",
-            0,
-            None,
-            None,
-            None,
+            &format!("正在停止运行中的网络（{} 个实例）", running.len()),
         );
         for config in &running {
             if let Err(error) = runtime.lock().unwrap().stop(config) {
@@ -1038,16 +1104,7 @@ mod windows_service {
                 return;
             }
         }
-        set_task(
-            &tasks,
-            &task_id,
-            "installing",
-            "正在替换 EasyTier 内核",
-            0,
-            None,
-            None,
-            None,
-        );
+        set_phase("installing", "正在替换 EasyTier 内核");
         if let Err(error) = kernel_updater::install(&runtime_dir, &staged) {
             for config in &running {
                 let _ = runtime.lock().unwrap().start(config);
@@ -1055,26 +1112,34 @@ mod windows_service {
             finish("failed", "内核替换失败".into(), Some(error), None);
             return;
         }
-        set_task(
-            &tasks,
-            &task_id,
+        set_phase(
             "restarting",
-            "正在恢复原有网络",
-            0,
-            None,
-            None,
-            None,
+            &format!("正在恢复原有网络（{} 个实例）", running.len()),
         );
         let mut failures = Vec::new();
         for config in &running {
             if let Err(error) = runtime.lock().unwrap().start(config) {
+                service_log(
+                    logger,
+                    "ERROR",
+                    format!("kernel update restart {} failed: {error}", config.id),
+                );
                 failures.push(format!("{}: {}", config.id, error));
             } else {
+                let mut ready = false;
                 for _ in 0..8 {
-                    if runtime.lock().unwrap().portal_ready(config) {
+                    if runtime_manager::portal_ready_port(config.rpc_port) {
+                        ready = true;
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                if !ready {
+                    service_log(
+                        logger,
+                        "WARN",
+                        format!("kernel update restart {}: portal not ready yet", config.id),
+                    );
                 }
             }
         }

@@ -17,6 +17,12 @@ pub const MAX_LOG_BYTES: usize = 2 * 1024 * 1024;
 /// write_response size check, silently closing the connection.
 pub const LOG_TAIL_MAX_BYTES: usize = 384 * 1024;
 
+/// Bounded readiness probe for an EasyTier RPC portal on localhost.
+pub fn portal_ready_port(port: u16) -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok()
+}
+
 #[derive(Debug, Default)]
 pub struct LogBuffer {
     text: String,
@@ -311,9 +317,11 @@ impl RuntimeManager {
         Ok(self.snapshot(cfg))
     }
 
-    /// Non-blocking readiness probe for an instance's RPC portal.
+    /// Bounded readiness probe for an instance's RPC portal. A plain
+    /// `TcpStream::connect` can block for tens of seconds when the listener
+    /// is half-dead, and callers hold the runtime lock while probing.
     pub fn portal_ready(&self, cfg: &InstanceConfig) -> bool {
-        std::net::TcpStream::connect(("127.0.0.1", cfg.rpc_port)).is_ok()
+        portal_ready_port(cfg.rpc_port)
     }
     pub fn stop(&mut self, cfg: &InstanceConfig) -> Result<InstanceSnapshot, String> {
         if let Some(mut child) = self.children.remove(&cfg.id) {

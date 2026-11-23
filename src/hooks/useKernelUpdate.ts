@@ -135,8 +135,24 @@ export function useKernelUpdate(
         } else if (alive) {
           timer = window.setTimeout(() => void poll(), 1000);
         }
-      } catch {
-        if (alive) timer = window.setTimeout(() => void poll(), 1500);
+      } catch (e) {
+        if (!alive) return;
+        // A service restart drops in-memory tasks. Treat it as a terminal
+        // failure instead of polling a task id that can never come back.
+        if (/task not found/i.test(String(e))) {
+          setKernelUpdate(prev =>
+            prev
+              ? {
+                  ...prev,
+                  phase: 'failed',
+                  message: '更新任务已失效（后台服务可能重启过）',
+                  error: String(e),
+                }
+              : prev
+          );
+          return;
+        }
+        timer = window.setTimeout(() => void poll(), 1500);
       }
     };
     void poll();
