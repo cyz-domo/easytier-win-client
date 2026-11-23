@@ -20,6 +20,16 @@ on:
         default: false
         required: false
         type: boolean
+      x64_only:
+        description: Build only the x64 matrix (faster verification)
+        default: false
+        required: false
+        type: boolean
+      skip_portable:
+        description: Skip the portable zip (installer only)
+        default: false
+        required: false
+        type: boolean
       version:
         description: Release version tag (e.g. v0.1.0); required if create_release is true
         default: ''
@@ -30,18 +40,26 @@ permissions:
   contents: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        shell: bash
+        run: |
+          if [ "${{ inputs.x64_only }}" = "true" ]; then
+            echo 'matrix={"include":[{"arch":"x64","target":"x86_64-pc-windows-msvc","core_asset":"easytier-windows-x86_64"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"include":[{"arch":"x64","target":"x86_64-pc-windows-msvc","core_asset":"easytier-windows-x86_64"},{"arch":"arm64","target":"aarch64-pc-windows-msvc","core_asset":"easytier-windows-arm64"}]}' >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: prepare
     runs-on: windows-latest
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            target: x86_64-pc-windows-msvc
-            core_asset: easytier-windows-x86_64
-          - arch: arm64
-            target: aarch64-pc-windows-msvc
-            core_asset: easytier-windows-arm64
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -131,6 +149,7 @@ jobs:
           }
 
       - name: Assemble portable packages
+        if: inputs.skip_portable != true
         shell: pwsh
         run: |
           $release = 'src-tauri/target/${{ matrix.target }}/release'
@@ -147,6 +166,7 @@ jobs:
       - name: Build standalone portable with embedded WebView2 (x64 only, release/full builds)
         if: >-
           matrix.arch == 'x64' &&
+          inputs.skip_portable != true &&
           (startsWith(github.ref, 'refs/tags/v') || inputs.create_release == true || inputs.full_release == true)
         shell: pwsh
         run: |
