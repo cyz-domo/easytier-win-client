@@ -193,13 +193,15 @@ struct App {
     font_loaded: bool,
     style: egui::Style,
     quitting: bool,
+    hidden: bool,
+    pending_hide: bool,
     #[cfg(windows)]
     tray: Option<tray_icon::TrayIcon>,
     logs: Vec<(String, &'static str, &'static str)>,
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, start_hidden: bool) -> Self {
         let (font_loaded, style) = theme::setup(&cc.egui_ctx);
 
         let mut history = VecDeque::with_capacity(120);
@@ -251,6 +253,8 @@ impl App {
             font_loaded,
             style,
             quitting: false,
+            hidden: start_hidden,
+            pending_hide: start_hidden,
             #[cfg(windows)]
             tray: tray::setup(&cc.egui_ctx),
             logs,
@@ -688,6 +692,11 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.pending_hide {
+            self.pending_hide = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
         #[cfg(windows)]
         {
             if tray::take_quit() {
@@ -695,20 +704,23 @@ impl eframe::App for App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             if tray::take_show() && !self.quitting {
+                self.hidden = false;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                ctx.request_repaint();
             }
         }
 
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
+            self.hidden = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
 
-        let now = ctx.input(|i| i.time);
-        self.tick(now);
-        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        if !self.hidden {
+            let now = ctx.input(|i| i.time);
+            self.tick(now);
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -774,6 +786,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "EasyTier Native Spike",
         options,
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, start_hidden)))),
     )
 }
