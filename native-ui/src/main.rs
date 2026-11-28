@@ -632,17 +632,23 @@ impl App {
         ui.add_space(12.0);
 
         let (lab, _) = ui.allocate_exact_size(Vec2::new(w, 18.0), Sense::hover());
-        txt(&p, Pos2::new(lab.left() + 2.0, lab.center().y), Align2::LEFT_CENTER, "网络", 11.0, DIM);
-        txt(&p, Pos2::new(lab.right() - 2.0, lab.center().y), Align2::RIGHT_CENTER, format!("{} 个", self.instances.len()), 10.5, DIM);
-
         let query = self.search.trim().to_lowercase();
         let instances = self.instances.clone();
-        let active = self.active.clone();
-        let mut clicked: Option<String> = None;
-        for inst in instances
+        let visible: Vec<&service::Instance> = instances
             .iter()
             .filter(|i| query.is_empty() || i.name.to_lowercase().contains(&query))
-        {
+            .collect();
+        let count_label = if query.is_empty() {
+            format!("{} 个", instances.len())
+        } else {
+            format!("{}/{} 个", visible.len(), instances.len())
+        };
+        txt(&p, Pos2::new(lab.left() + 2.0, lab.center().y), Align2::LEFT_CENTER, "网络", 11.0, DIM);
+        txt(&p, Pos2::new(lab.right() - 2.0, lab.center().y), Align2::RIGHT_CENTER, count_label, 10.5, DIM);
+
+        let active = self.active.clone();
+        let mut clicked: Option<String> = None;
+        for inst in visible {
             let selected = active.as_deref() == Some(inst.id.as_str());
             let (item, resp) = ui.allocate_exact_size(Vec2::new(w, 58.0), Sense::click());
             if resp.hovered() {
@@ -1295,7 +1301,8 @@ impl App {
         txt(&p, Pos2::new(r.left() + 18.0, r.top() + 16.0), Align2::LEFT_TOP, "运行日志", 14.0, TEXT);
         let running = self.active_running();
         if !running {
-            txt(&p, Pos2::new(r.left() + 70.0, r.top() + 18.0), Align2::LEFT_TOP, "(网络未运行)", 10.5, DIM);
+            let tag_x = r.left() + 18.0 + text_w("运行日志", 14.0) + 10.0;
+            txt(&p, Pos2::new(tag_x, r.top() + 19.0), Align2::LEFT_TOP, "(网络未运行)", 10.5, DIM);
         }
 
         let filters = [LogFilter::All, LogFilter::Info, LogFilter::Warn, LogFilter::Error];
