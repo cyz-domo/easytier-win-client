@@ -2248,10 +2248,10 @@ impl App {
                 }
             });
             if cfg.networking_method != 2 {
-                let arrow = if self.peer_urls_open { "▾" } else { "▸" };
+                let toggle = if self.peer_urls_open { "收起" } else { "展开" };
                 let header = ui.add(
                     egui::Button::new(
-                        RichText::new(format!("{arrow} 公共服务器（{}）", cfg.peer_urls.len()))
+                        RichText::new(format!("公共服务器（{}） · {toggle}", cfg.peer_urls.len()))
                             .size(11.5)
                             .color(MUTED),
                     )
@@ -2362,9 +2362,9 @@ impl App {
         ui.add_space(8.0);
         if ui
             .button(if show_advanced {
-                "▾ 收起高级设置"
+                "收起高级设置"
             } else {
-                "▸ 展开高级设置"
+                "展开高级设置"
             })
             .clicked()
         {
