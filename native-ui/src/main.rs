@@ -12,6 +12,7 @@ use serde_json::json;
 
 mod config;
 mod service;
+mod settings;
 mod theme;
 use theme::*;
 
@@ -22,13 +23,14 @@ mod tray {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     };
 
     static SHOW: AtomicBool = AtomicBool::new(false);
     static QUIT: AtomicBool = AtomicBool::new(false);
+    static TOGGLE: AtomicBool = AtomicBool::new(false);
 
     pub fn take_show() -> bool {
         SHOW.swap(false, Ordering::Relaxed)
@@ -36,6 +38,17 @@ mod tray {
 
     pub fn take_quit() -> bool {
         QUIT.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn take_toggle() -> bool {
+        TOGGLE.swap(false, Ordering::Relaxed)
+    }
+
+    pub struct TrayMenu {
+        pub icon: TrayIcon,
+        pub status: MenuItem,
+        pub toggle: MenuItem,
+        pub key: String,
     }
 
     fn icon() -> Icon {
@@ -67,14 +80,21 @@ mod tray {
         Icon::from_rgba(rgba, N, N).expect("valid tray icon")
     }
 
-    pub fn setup(ctx: &eframe::egui::Context) -> Option<TrayIcon> {
+    pub fn setup(ctx: &eframe::egui::Context) -> Option<TrayMenu> {
         let menu = Menu::new();
+        let status = MenuItem::new("EasyTier · 未选择网络", false, None);
+        let toggle = MenuItem::new("启动当前网络", false, None);
         let show = MenuItem::new("显示主界面", true, None);
         let quit = MenuItem::new("退出", true, None);
+        menu.append(&status).ok()?;
+        menu.append(&PredefinedMenuItem::separator()).ok()?;
+        menu.append(&toggle).ok()?;
         menu.append(&show).ok()?;
+        menu.append(&PredefinedMenuItem::separator()).ok()?;
         menu.append(&quit).ok()?;
         let show_id = show.id().clone();
         let quit_id = quit.id().clone();
+        let toggle_id = toggle.id().clone();
 
         let menu_ctx = ctx.clone();
         MenuEvent::set_event_handler(Some(Arc::new(move |e: MenuEvent| {
@@ -83,6 +103,9 @@ mod tray {
                 menu_ctx.request_repaint();
             } else if e.id == quit_id {
                 QUIT.store(true, Ordering::Relaxed);
+                menu_ctx.request_repaint();
+            } else if e.id == toggle_id {
+                TOGGLE.store(true, Ordering::Relaxed);
                 menu_ctx.request_repaint();
             }
         })));
@@ -100,12 +123,18 @@ mod tray {
             }
         }));
 
-        TrayIconBuilder::new()
+        let icon = TrayIconBuilder::new()
             .with_tooltip("EasyTier · 原生客户端")
             .with_menu(Box::new(menu))
             .with_icon(icon())
             .build()
-            .ok()
+            .ok()?;
+        Some(TrayMenu {
+            icon,
+            status,
+            toggle,
+            key: String::new(),
+        })
     }
 }
 
@@ -113,15 +142,21 @@ mod tray {
 enum Tab {
     Status,
     Traffic,
+    Peers,
+    Routes,
     Config,
     Logs,
+    Settings,
 }
 
-const TABS: [(Tab, &str); 4] = [
+const TABS: [(Tab, &str); 7] = [
     (Tab::Status, "状态"),
     (Tab::Traffic, "流量"),
+    (Tab::Peers, "成员"),
+    (Tab::Routes, "路由"),
     (Tab::Config, "配置"),
     (Tab::Logs, "日志"),
+    (Tab::Settings, "设置"),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -242,7 +277,19 @@ struct App {
     selected_peer: Option<usize>,
     history: VecDeque<(f32, f32)>,
     node: Option<service::NodeInfo>,
-    routes: usize,
+    routes: Vec<service::Route>,
+    route_query: String,
+    kernel: Option<service::KernelProgress>,
+    kernel_proxy: String,
+    custom_proxy: String,
+    selected_version: String,
+    releases: Option<settings::ReleaseInfo>,
+    releases_error: Option<String>,
+    releases_loading: bool,
+    proxies: Vec<settings::LocalProxy>,
+    proxies_scanned: bool,
+    autostart: Option<settings::Autostart>,
+    autostart_min: bool,
     status_error: Option<String>,
     instances: Vec<service::Instance>,
     active: Option<String>,
@@ -265,7 +312,7 @@ struct App {
     actions: Sender<service::Action>,
     events: Receiver<service::Event>,
     #[cfg(windows)]
-    tray: Option<tray_icon::TrayIcon>,
+    tray: Option<tray::TrayMenu>,
 }
 
 fn zero_history() -> VecDeque<(f32, f32)> {
@@ -276,7 +323,7 @@ impl App {
     fn new(cc: &eframe::CreationContext<'_>, start_hidden: bool) -> Self {
         let (font_loaded, style) = theme::setup(&cc.egui_ctx);
         let (actions, events) = service::spawn(cc.egui_ctx.clone());
-        Self {
+        let mut app = Self {
             tab: Tab::Status,
             search: String::new(),
             peer_query: String::new(),
@@ -299,7 +346,19 @@ impl App {
             selected_peer: None,
             history: zero_history(),
             node: None,
-            routes: 0,
+            routes: Vec::new(),
+            route_query: String::new(),
+            kernel: None,
+            kernel_proxy: "direct".to_owned(),
+            custom_proxy: String::new(),
+            selected_version: String::new(),
+            releases: None,
+            releases_error: None,
+            releases_loading: false,
+            proxies: Vec::new(),
+            proxies_scanned: false,
+            autostart: None,
+            autostart_min: true,
             status_error: None,
             instances: Vec::new(),
             active: None,
@@ -323,7 +382,9 @@ impl App {
             events,
             #[cfg(windows)]
             tray: tray::setup(&cc.egui_ctx),
-        }
+        };
+        let _ = app.actions.send(service::Action::AutostartGet);
+        app
     }
 
     fn active_instance(&self) -> Option<&service::Instance> {
@@ -349,7 +410,8 @@ impl App {
         let _ = self.actions.send(service::Action::SetActive(id));
         self.peers.clear();
         self.node = None;
-        self.routes = 0;
+        self.routes.clear();
+        self.route_query.clear();
         self.status_error = None;
         self.selected_peer = None;
         self.history = zero_history();
@@ -921,7 +983,7 @@ impl App {
                         if !running {
                             self.peers.clear();
                             self.node = None;
-                            self.routes = 0;
+                            self.routes.clear();
                             self.status_error = None;
                         }
                         self.prev_running = running;
@@ -929,7 +991,7 @@ impl App {
                         self.instances.clear();
                         self.peers.clear();
                         self.node = None;
-                        self.routes = 0;
+                        self.routes.clear();
                         self.prev_running = false;
                     }
                 }
@@ -967,7 +1029,59 @@ impl App {
                     if !result.ok && result.label == "新建网络" {
                         self.pending_active = None;
                     }
+                    if !result.ok && result.label == "内核更新" {
+                        self.kernel = None;
+                    }
                     self.toast(ctx, format!("{}：{}", result.label, result.message), result.ok);
+                }
+                service::Event::Kernel(progress) => {
+                    let was_terminal = self.kernel.as_ref().map(|k| k.terminal()).unwrap_or(false);
+                    if progress.terminal() && !was_terminal {
+                        let ok = progress.status == "completed";
+                        let message = if progress.message.is_empty() {
+                            progress.phase_label().to_owned()
+                        } else {
+                            progress.message.clone()
+                        };
+                        self.toast(ctx, format!("内核更新：{message}"), ok);
+                    }
+                    self.kernel = Some(progress);
+                }
+                service::Event::Proxies(list) => {
+                    self.proxies_scanned = true;
+                    let count = list.len();
+                    self.proxies = list;
+                    if let Some(first) = self.proxies.first() {
+                        if self.kernel_proxy == "direct" || self.kernel_proxy.is_empty() {
+                            self.kernel_proxy = format!("local:{}", first.addr);
+                        }
+                        self.toast(ctx, format!("发现 {count} 个可用本地代理"), true);
+                    } else {
+                        self.toast(ctx, "未发现可用的本地代理，将使用直连", false);
+                    }
+                }
+                service::Event::Releases(result) => {
+                    self.releases_loading = false;
+                    match result {
+                        Ok(info) => {
+                            let latest = info.latest.clone();
+                            self.releases = Some(info);
+                            self.releases_error = None;
+                            if latest.is_none() {
+                                self.toast(ctx, "未找到包含 Windows 资源包的最新版本", false);
+                            }
+                        }
+                        Err(e) => {
+                            self.releases_error = Some(e);
+                        }
+                    }
+                }
+                service::Event::Autostart(state) => {
+                    let changed = self.autostart.is_none();
+                    if changed || self.autostart.as_ref().map(|a| a.enabled != state.enabled).unwrap_or(false) {
+                        self.autostart_min = state.minimized;
+                    }
+                    self.autostart = Some(state);
                 }
             }
         }
@@ -1126,7 +1240,7 @@ impl App {
         p.circle_filled(Pos2::new(rect.left() + 12.0 + text_w(&name, 15.0), rect.center().y), 3.5, dot);
         txt(&p, Pos2::new(rect.left() + 22.0 + text_w(&name, 15.0), rect.center().y), Align2::LEFT_CENTER, status, 11.5, MUTED);
 
-        let seg_w = 58.0;
+        let seg_w = 54.0;
         let gap = 2.0;
         let total = TABS.len() as f32 * seg_w + (TABS.len() as f32 - 1.0) * gap + 8.0;
         let tabs = Rect::from_min_size(Pos2::new(rect.right() - total - 2.0, rect.center().y - 15.0), Vec2::new(total, 30.0));
@@ -1216,6 +1330,72 @@ impl App {
         }
     }
 
+    fn effective_proxy(&self) -> String {
+        let value = self.kernel_proxy.trim();
+        if value == "mirror" {
+            self.custom_proxy.trim().to_owned()
+        } else if value.is_empty() {
+            "direct".to_owned()
+        } else {
+            value.to_owned()
+        }
+    }
+
+    fn start_kernel_update(&mut self, ctx: &egui::Context) {
+        if !self.service_running {
+            self.toast(ctx, "后台服务不可用，无法更新内核", false);
+            return;
+        }
+        if self.kernel.as_ref().map(|k| !k.terminal()).unwrap_or(false) {
+            return;
+        }
+        let proxy = self.effective_proxy();
+        if proxy.is_empty() {
+            self.toast(ctx, "请填写镜像前缀，或改用直连 / 本地代理", false);
+            return;
+        }
+        let target = if self.selected_version.trim().is_empty() {
+            None
+        } else {
+            Some(self.selected_version.trim().to_owned())
+        };
+        self.kernel = Some(service::KernelProgress {
+            status: "queued".to_owned(),
+            phase: "queued".to_owned(),
+            message: "正在提交更新任务…".to_owned(),
+            ..Default::default()
+        });
+        let _ = self.actions.send(service::Action::KernelStart { proxy, target });
+    }
+
+    #[cfg(windows)]
+    fn sync_tray(&mut self) {
+        let name = self.active_name();
+        let (status, _) = self.status_text();
+        let has_instance = self.active_instance().is_some();
+        let running = self.active_running();
+        let toggle_label = if running {
+            "停止当前网络"
+        } else {
+            "启动当前网络"
+        };
+        let enabled = has_instance && self.busy.is_none();
+        let tooltip = format!("EasyTier · {name} · {status}");
+        let status_text = format!("{name} · {status}");
+        let key = format!("{name}|{status}|{toggle_label}|{enabled}");
+        let Some(tray) = self.tray.as_mut() else {
+            return;
+        };
+        if tray.key == key {
+            return;
+        }
+        tray.key = key;
+        let _ = tray.status.set_text(status_text);
+        let _ = tray.toggle.set_text(toggle_label);
+        tray.toggle.set_enabled(enabled);
+        let _ = tray.icon.set_tooltip(Some(tooltip));
+    }
+
     fn status_tab(&mut self, ui: &mut egui::Ui) {
         let w = ui.available_width();
         let p = ui.painter().clone();
@@ -1299,7 +1479,7 @@ impl App {
             ),
             (
                 "路由条目",
-                if running { self.routes.to_string() } else { "—".to_owned() },
+                if running { self.routes.len().to_string() } else { "—".to_owned() },
                 "已知网段".to_owned(),
             ),
             ("本次累计", total, "会话累计".to_owned()),
@@ -1441,6 +1621,442 @@ impl App {
             })
             .map(|(i, _)| i)
             .collect()
+    }
+
+    fn peers_tab(&mut self, ui: &mut egui::Ui) {
+        let w = ui.available_width();
+        let p = ui.painter().clone();
+        let running = self.active_running();
+
+        let (head, _) = ui.allocate_exact_size(Vec2::new(w, 34.0), Sense::hover());
+        txt(&p, Pos2::new(head.left() + 2.0, head.center().y), Align2::LEFT_CENTER, "组网成员", 15.0, TEXT);
+        let count_label = self.peers.len().to_string();
+        let nx = head.left() + 2.0 + text_w("组网成员", 15.0) + 8.0;
+        let nw = text_w(&count_label, 10.5) + 12.0;
+        p.rect_filled(Rect::from_min_size(Pos2::new(nx, head.center().y - 9.0), Vec2::new(nw, 18.0)), CornerRadius::same(9), CARD_HI);
+        txt(&p, Pos2::new(nx + nw / 2.0, head.center().y), Align2::CENTER_CENTER, &count_label, 10.5, MUTED);
+
+        let box_w = 220.0;
+        let box_r = Rect::from_min_size(Pos2::new(head.right() - box_w, head.center().y - 14.0), Vec2::new(box_w, 28.0));
+        ui.put(box_r, egui::TextEdit::singleline(&mut self.peer_query).hint_text("搜索成员 / IP / 节点 ID"));
+
+        ui.add_space(10.0);
+        if !running {
+            let (row, _) = ui.allocate_exact_size(Vec2::new(w, 46.0), Sense::hover());
+            txt(&p, Pos2::new(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, "网络未运行，启动后显示成员与链路详情", 11.5, DIM);
+            return;
+        }
+        if let Some(err) = &self.status_error {
+            let (row, _) = ui.allocate_exact_size(Vec2::new(w, 40.0), Sense::hover());
+            txt(&p, Pos2::new(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, format!("内核数据暂不可用：{err}"), 11.5, WARN);
+        }
+
+        let (th, _) = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::hover());
+        let cols: [(&str, f32); 9] = [
+            ("成员", 0.00),
+            ("虚拟 IPv4", 0.19),
+            ("连接", 0.32),
+            ("延迟", 0.40),
+            ("丢包", 0.48),
+            ("上传", 0.56),
+            ("下载", 0.65),
+            ("隧道", 0.74),
+            ("版本", 0.85),
+        ];
+        for (label, fx) in cols.iter() {
+            let dx = if *fx == 0.0 { 14.0 } else { 0.0 };
+            txt(&p, Pos2::new(th.left() + th.width() * fx + dx, th.center().y), Align2::LEFT_CENTER, *label, 10.5, DIM);
+        }
+        p.hline(th.x_range(), th.bottom() - 0.5, Stroke::new(1.0, BORDER));
+
+        let idxs = self.visible_peers();
+        let peers = self.peers.clone();
+        for i in idxs {
+            let peer = &peers[i];
+            let (row, resp) = ui.allocate_exact_size(Vec2::new(w, 46.0), Sense::click());
+            if resp.hovered() {
+                p.rect_filled(row, CornerRadius::same(8), CARD);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let name = if peer.hostname.is_empty() {
+                if peer.ip.is_empty() { peer.id.clone() } else { peer.ip.clone() }
+            } else {
+                peer.hostname.clone()
+            };
+            let (route_label, route_color) = route_badge(&peer.cost);
+            let accent = if peer.cost == "local" || peer.cost == "0" { ACCENT } else { route_color };
+            let av = Pos2::new(row.left() + 26.0, row.center().y);
+            p.circle_filled(av, 13.0, CARD_HI);
+            let initial = name.chars().next().map(|c| c.to_string()).unwrap_or_else(|| "?".to_owned());
+            txt(&p, av, Align2::CENTER_CENTER, &initial, 12.0, accent);
+            txt(&p, Pos2::new(row.left() + 46.0, row.top() + 11.0), Align2::LEFT_TOP, truncate(&name, 16), 12.5, TEXT);
+            let id_text = if peer.id.is_empty() { peer.version.clone() } else { format!("et-{}", truncate(&peer.id, 8)) };
+            mono(&p, Pos2::new(row.left() + 46.0, row.bottom() - 10.0), Align2::LEFT_BOTTOM, id_text, 10.0, DIM);
+            mono(&p, Pos2::new(row.left() + row.width() * 0.19, row.center().y), Align2::LEFT_CENTER, &peer.ip, 11.5, MUTED);
+            pill(&p, Pos2::new(row.left() + row.width() * 0.32, row.center().y - 10.0), 20.0, route_label, route_color, route_color.gamma_multiply(0.16));
+            let latency = if peer.cost == "local" || peer.cost == "0" {
+                "0 ms".to_owned()
+            } else if peer.latency > 0.0 {
+                format!("{:.0} ms", peer.latency)
+            } else {
+                "—".to_owned()
+            };
+            txt(&p, Pos2::new(row.left() + row.width() * 0.40, row.center().y), Align2::LEFT_CENTER, latency, 11.5, lat_color(peer.latency as u32));
+            txt(&p, Pos2::new(row.left() + row.width() * 0.48, row.center().y), Align2::LEFT_CENTER, format!("{:.1}%", peer.loss), 11.0, if peer.loss > 1.0 { WARN } else { MUTED });
+            txt(&p, Pos2::new(row.left() + row.width() * 0.56, row.center().y), Align2::LEFT_CENTER, format!("↑ {}", service::format_bytes(peer.tx)), 11.0, MUTED);
+            txt(&p, Pos2::new(row.left() + row.width() * 0.65, row.center().y), Align2::LEFT_CENTER, format!("↓ {}", service::format_bytes(peer.rx)), 11.0, MUTED);
+            let tunnel = if peer.tunnel.is_empty() { "—".to_owned() } else { peer.tunnel.clone() };
+            txt(&p, Pos2::new(row.left() + row.width() * 0.74, row.center().y), Align2::LEFT_CENTER, truncate(&tunnel, 9), 10.5, MUTED);
+            txt(&p, Pos2::new(row.left() + row.width() * 0.85, row.center().y), Align2::LEFT_CENTER, truncate(&peer.version, 9), 10.5, DIM);
+            p.hline(row.x_range(), row.bottom() - 0.5, Stroke::new(1.0, Color32::from_rgb(0x26, 0x2A, 0x30)));
+        }
+
+        if self.peers.is_empty() && self.status_error.is_none() {
+            let (row, _) = ui.allocate_exact_size(Vec2::new(w, 46.0), Sense::hover());
+            txt(&p, Pos2::new(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, "等待内核返回成员数据…", 11.5, DIM);
+        }
+    }
+
+    fn routes_tab(&mut self, ui: &mut egui::Ui) {
+        let w = ui.available_width();
+        let p = ui.painter().clone();
+        let running = self.active_running();
+
+        let (head, _) = ui.allocate_exact_size(Vec2::new(w, 34.0), Sense::hover());
+        txt(&p, Pos2::new(head.left() + 2.0, head.center().y), Align2::LEFT_CENTER, "路由表", 15.0, TEXT);
+        let box_w = 240.0;
+        let box_r = Rect::from_min_size(Pos2::new(head.right() - box_w, head.center().y - 14.0), Vec2::new(box_w, 28.0));
+        ui.put(box_r, egui::TextEdit::singleline(&mut self.route_query).hint_text("搜索网段 / 主机 / 下一跳"));
+
+        ui.add_space(10.0);
+        if !running {
+            let (row, _) = ui.allocate_exact_size(Vec2::new(w, 46.0), Sense::hover());
+            txt(&p, Pos2::new(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, "网络未运行，启动后显示内核路由表", 11.5, DIM);
+            return;
+        }
+
+        let (th, _) = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::hover());
+        let cols: [(&str, f32); 6] = [
+            ("目标", 0.00),
+            ("主机名", 0.18),
+            ("下一跳", 0.36),
+            ("跳数", 0.56),
+            ("路径延迟", 0.63),
+            ("代理网段", 0.75),
+        ];
+        for (label, fx) in cols.iter() {
+            let dx = if *fx == 0.0 { 14.0 } else { 0.0 };
+            txt(&p, Pos2::new(th.left() + th.width() * fx + dx, th.center().y), Align2::LEFT_CENTER, *label, 10.5, DIM);
+        }
+        p.hline(th.x_range(), th.bottom() - 0.5, Stroke::new(1.0, BORDER));
+
+        let q = self.route_query.trim().to_lowercase();
+        let routes = self.routes.clone();
+        let mut shown = 0;
+        for route in routes.iter() {
+            let proxy = route.proxy_cidrs.join(", ");
+            if !q.is_empty()
+                && !route.ipv4.contains(&q)
+                && !route.hostname.to_lowercase().contains(&q)
+                && !route.next_hop.to_lowercase().contains(&q)
+                && !proxy.to_lowercase().contains(&q)
+            {
+                continue;
+            }
+            shown += 1;
+            let (row, _) = ui.allocate_exact_size(Vec2::new(w, 40.0), Sense::hover());
+            let target = if route.ipv4.is_empty() { "—".to_owned() } else { route.ipv4.clone() };
+            mono(&p, Pos2::new(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, &target, 11.5, TEXT);
+            txt(&p, Pos2::new(row.left() + row.width() * 0.18, row.center().y), Align2::LEFT_CENTER, truncate(&route.hostname, 14), 11.5, MUTED);
+            let hop = if route.next_hop.is_empty() { "本机" } else { route.next_hop.as_str() };
+            txt(&p, Pos2::new(row.left() + row.width() * 0.36, row.center().y), Align2::LEFT_CENTER, truncate(hop, 16), 11.0, MUTED);
+            txt(&p, Pos2::new(row.left() + row.width() * 0.56, row.center().y), Align2::LEFT_CENTER, format!("{:.0}", route.hops), 11.0, MUTED);
+            let latency = if route.latency > 0.0 { format!("{:.1} ms", route.latency) } else { "—".to_owned() };
+            txt(&p, Pos2::new(row.left() + row.width() * 0.63, row.center().y), Align2::LEFT_CENTER, latency, 11.0, lat_color(route.latency.max(0.0) as u32));
+            let proxy = if proxy.is_empty() { "—".to_owned() } else { proxy };
+            txt(&p, Pos2::new(row.left() + row.width() * 0.75, row.center().y), Align2::LEFT_CENTER, truncate(&proxy, 20), 10.5, DIM);
+            p.hline(row.x_range(), row.bottom() - 0.5, Stroke::new(1.0, Color32::from_rgb(0x26, 0x2A, 0x30)));
+        }
+
+        if shown == 0 {
+            let (row, _) = ui.allocate_exact_size(Vec2::new(w, 46.0), Sense::hover());
+            let message = if self.routes.is_empty() { "等待内核心路由数据…" } else { "当前筛选条件下没有路由" };
+            txt(&p, Pos2::new(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, message, 11.5, DIM);
+        }
+    }
+
+    fn proxy_label(&self) -> String {
+        let value = self.kernel_proxy.as_str();
+        if value == "direct" || value.is_empty() {
+            "直连 GitHub".to_owned()
+        } else if value == "mirror" {
+            if self.custom_proxy.trim().is_empty() {
+                "自定义镜像前缀（未填写）".to_owned()
+            } else {
+                format!("镜像：{}", truncate(&self.custom_proxy, 36))
+            }
+        } else if let Some(addr) = value.strip_prefix("local:") {
+            match self.proxies.iter().find(|p| p.addr == addr) {
+                Some(proxy) => format!("{} · {}", proxy.label, proxy.addr),
+                None => format!("本地代理 {addr}"),
+            }
+        } else {
+            value.to_owned()
+        }
+    }
+
+    fn settings_tab(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+
+        card_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("后台服务").size(14.0).color(TEXT));
+                ui.add_space(8.0);
+                let (color, text) = if self.service_running { (OK, "运行中") } else { (ERR, "不可用") };
+                ui.label(RichText::new(format!("● {text}")).size(10.5).color(color));
+            });
+            ui.label(
+                RichText::new("网络实例进程与内核版本由 Windows 服务 EasyTierService 托管，关闭本程序不会断开已运行网络。")
+                    .size(10.5)
+                    .color(DIM),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("重试连接").clicked() {
+                    let _ = self.actions.send(service::Action::Refresh);
+                    self.toast(&ctx, "正在重新连接后台服务…", true);
+                }
+                ui.label(RichText::new(format!("{} 个网络实例", self.instances.len())).size(10.5).color(MUTED));
+                if let Some(err) = self.service_error.clone() {
+                    ui.label(RichText::new(truncate(&err, 48)).size(10.5).color(ERR));
+                }
+            });
+        });
+
+        ui.add_space(8.0);
+        let current_kernel = self.node.as_ref().map(|n| n.version.clone()).unwrap_or_default();
+        card_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("内核版本管理").size(14.0).color(TEXT));
+                ui.add_space(8.0);
+                let current = if current_kernel.is_empty() {
+                    "当前内核：未知（启动网络后读取）".to_owned()
+                } else {
+                    format!("当前内核：{current_kernel}")
+                };
+                ui.label(RichText::new(current).size(10.5).color(MUTED));
+            });
+            ui.label(
+                RichText::new("从 GitHub Release 下载 easytier-windows-x86_64 资源包，由后台服务校验、替换并重启内核。")
+                    .size(10.5)
+                    .color(DIM),
+            );
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("下载方式").size(11.5).color(MUTED));
+                egui::ComboBox::from_id_salt("kernel-proxy")
+                    .selected_text(self.proxy_label())
+                    .width(240.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.kernel_proxy, "direct".to_owned(), "直连 GitHub");
+                        let proxies = self.proxies.clone();
+                        for proxy in proxies {
+                            let value = format!("local:{}", proxy.addr);
+                            let label = format!("{} · {}", proxy.label, proxy.addr);
+                            ui.selectable_value(&mut self.kernel_proxy, value, label);
+                        }
+                        ui.selectable_value(&mut self.kernel_proxy, "mirror".to_owned(), "自定义镜像前缀");
+                    });
+                if ui.button("检测本地代理").clicked() {
+                    let _ = self.actions.send(service::Action::DetectProxies);
+                }
+                if self.proxies_scanned && self.proxies.is_empty() {
+                    ui.label(RichText::new("未发现可用代理").size(10.0).color(DIM));
+                }
+            });
+            if self.kernel_proxy == "mirror" {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("镜像前缀").size(11.5).color(MUTED));
+                    let width = (ui.available_width() - 4.0).max(160.0);
+                    ui.add_sized(
+                        [width, 26.0],
+                        egui::TextEdit::singleline(&mut self.custom_proxy)
+                            .hint_text("例如 https://ghfast.top"),
+                    );
+                });
+                ui.label(
+                    RichText::new("GitHub 原始地址会拼接到镜像前缀之后：{前缀}/https://github.com/…")
+                        .size(10.5)
+                        .color(DIM),
+                );
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("目标版本").size(11.5).color(MUTED));
+                let selected = if self.selected_version.is_empty() {
+                    "最新版本（自动选择）".to_owned()
+                } else {
+                    self.selected_version.clone()
+                };
+                egui::ComboBox::from_id_salt("kernel-version")
+                    .selected_text(selected)
+                    .width(240.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.selected_version, String::new(), "最新版本（自动选择）");
+                        let versions = self.releases.as_ref().map(|r| r.versions.clone()).unwrap_or_default();
+                        for version in versions {
+                            ui.selectable_value(&mut self.selected_version, version.clone(), version);
+                        }
+                    });
+                if ui
+                    .add_enabled(!self.releases_loading, egui::Button::new(if self.releases_loading { "获取中…" } else { "获取版本列表" }))
+                    .clicked()
+                {
+                    let proxy = self.effective_proxy();
+                    self.releases_loading = true;
+                    self.releases_error = None;
+                    let _ = self.actions.send(service::Action::CheckReleases { proxy });
+                }
+            });
+            if let Some(info) = &self.releases {
+                if let Some(latest) = &info.latest {
+                    ui.label(
+                        RichText::new(format!("GitHub 最新版本：{latest} · 共 {} 个可用版本", info.versions.len()))
+                            .size(10.5)
+                            .color(OK),
+                    );
+                }
+            }
+            if let Some(err) = self.releases_error.clone() {
+                ui.label(RichText::new(truncate(&err, 96)).size(10.5).color(ERR));
+            }
+
+            ui.add_space(8.0);
+            let busy = self.kernel.as_ref().map(|k| !k.terminal()).unwrap_or(false);
+            ui.horizontal(|ui| {
+                let can_update = self.service_running && !busy;
+                if ui
+                    .add_enabled(
+                        can_update,
+                        egui::Button::new(RichText::new("下载并安装").color(Color32::WHITE)).fill(ACCENT),
+                    )
+                    .clicked()
+                {
+                    self.start_kernel_update(&ctx);
+                }
+                if busy && ui.button("取消更新").clicked() {
+                    let _ = self.actions.send(service::Action::KernelCancel);
+                }
+                if let Some(kernel) = &self.kernel {
+                    ui.label(RichText::new(format!("{} · {:.0}%", kernel.phase_label(), kernel.percent)).size(10.5).color(MUTED));
+                }
+            });
+
+            if let Some(kernel) = self.kernel.clone() {
+                ui.add_space(4.0);
+                let fraction = (kernel.percent as f32 / 100.0).clamp(0.0, 1.0);
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .desired_width(ui.available_width().min(540.0))
+                        .text(format!("{:.0}%", kernel.percent)),
+                );
+                let detail = if kernel.total > 0 {
+                    format!(
+                        "{} / {}",
+                        service::format_bytes(kernel.downloaded as f64),
+                        service::format_bytes(kernel.total as f64)
+                    )
+                } else {
+                    service::format_bytes(kernel.downloaded as f64)
+                };
+                let color = if kernel.status == "failed" {
+                    ERR
+                } else if kernel.status == "completed" {
+                    OK
+                } else {
+                    MUTED
+                };
+                ui.label(
+                    RichText::new(format!("{} · {} · {}", kernel.phase_label(), detail, truncate(&kernel.message, 56)))
+                        .size(10.5)
+                        .color(color),
+                );
+            }
+        });
+
+        ui.add_space(8.0);
+        card_frame().show(ui, |ui| {
+            ui.label(RichText::new("开机自启").size(14.0).color(TEXT));
+            ui.label(RichText::new("登录 Windows 后自动启动本程序（写入 HKCU Run，仅当前用户）。").size(10.5).color(DIM));
+            ui.add_space(4.0);
+            let current_enabled = self.autostart.as_ref().map(|a| a.enabled).unwrap_or(false);
+            let mut enabled = current_enabled;
+            let mut minimized = self.autostart_min;
+            ui.horizontal(|ui| {
+                if switch(ui, enabled) {
+                    enabled = !enabled;
+                }
+                ui.label(RichText::new("登录时自动启动").size(11.5).color(MUTED));
+            });
+            ui.horizontal(|ui| {
+                if switch(ui, minimized) {
+                    minimized = !minimized;
+                }
+                ui.label(RichText::new("启动后最小化到托盘").size(11.5).color(MUTED));
+            });
+            if enabled != current_enabled || (enabled && minimized != self.autostart_min) {
+                self.autostart_min = minimized;
+                if let Some(state) = self.autostart.as_mut() {
+                    state.enabled = enabled;
+                    state.minimized = minimized;
+                }
+                let _ = self.actions.send(service::Action::AutostartSet { enabled, minimized });
+            }
+
+            let registration = self
+                .autostart
+                .as_ref()
+                .filter(|a| a.enabled)
+                .map(|a| (a.path.clone(), a.minimized));
+            if let Some((path, registered_min)) = registration {
+                let current = std::env::current_exe().ok();
+                let mismatch = match &current {
+                    Some(exe) => {
+                        !path.is_empty()
+                            && exe.to_string_lossy().to_lowercase() != path.to_lowercase()
+                    }
+                    None => false,
+                };
+                ui.add_space(2.0);
+                let text = if path.is_empty() {
+                    "注册表值缺失".to_owned()
+                } else {
+                    format!("注册路径：{path}")
+                };
+                ui.label(RichText::new(truncate(&text, 96)).size(10.5).color(if mismatch { WARN } else { MUTED }));
+                if mismatch {
+                    ui.label(RichText::new("注册路径与当前程序位置不一致，自启动将无法生效。").size(10.5).color(WARN));
+                    if ui.button("修复自启路径").clicked() {
+                        let _ = self.actions.send(service::Action::AutostartSet { enabled: true, minimized: registered_min });
+                        self.toast(&ctx, "正在重新注册自启动…", true);
+                    }
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+        card_frame().show(ui, |ui| {
+            ui.label(RichText::new("关于").size(14.0).color(TEXT));
+            ui.label(RichText::new(format!("EasyTier 原生客户端 {VERSION}")).size(11.5).color(MUTED));
+            ui.label(
+                RichText::new("原生 egui / eframe 绘制，不依赖 WebView2；数据来自 EasyTierService 命名管道与 easytier-cli。")
+                    .size(10.5)
+                    .color(DIM),
+            );
+            ui.label(RichText::new("关闭窗口默认隐藏到托盘，网络保持后台运行。").size(10.5).color(DIM));
+        });
     }
 
     fn traffic_tab(&mut self, ui: &mut egui::Ui) {
@@ -2318,6 +2934,9 @@ impl eframe::App for App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
+            if tray::take_toggle() && !self.quitting {
+                self.toggle_running(ctx);
+            }
         }
 
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
@@ -2331,6 +2950,9 @@ impl eframe::App for App {
             self.visible_sent = Some(visible);
             let _ = self.actions.send(service::Action::SetVisible(visible));
         }
+
+        #[cfg(windows)]
+        self.sync_tray();
 
         if visible {
             ctx.request_repaint_after(Duration::from_millis(500));
@@ -2376,8 +2998,11 @@ impl eframe::App for App {
                     match self.tab {
                         Tab::Status => self.status_tab(ui),
                         Tab::Traffic => self.traffic_tab(ui),
+                        Tab::Peers => self.peers_tab(ui),
+                        Tab::Routes => self.routes_tab(ui),
                         Tab::Config => self.config_tab(ui),
                         Tab::Logs => self.logs_tab(ui),
+                        Tab::Settings => self.settings_tab(ui),
                     }
                     ui.add_space(24.0);
                 });

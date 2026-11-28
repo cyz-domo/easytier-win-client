@@ -80,11 +80,54 @@ pub struct ServiceState {
     pub instances: Vec<Instance>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct Route {
+    pub ipv4: String,
+    pub hostname: String,
+    pub proxy_cidrs: Vec<String>,
+    pub next_hop: String,
+    pub hops: f64,
+    pub latency: f64,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct KernelProgress {
+    pub task_id: String,
+    pub status: String,
+    pub phase: String,
+    pub percent: f64,
+    pub downloaded: u64,
+    pub total: u64,
+    pub message: String,
+}
+
+impl KernelProgress {
+    pub fn terminal(&self) -> bool {
+        matches!(self.status.as_str(), "completed" | "failed" | "cancelled")
+    }
+
+    pub fn phase_label(&self) -> &str {
+        match self.phase.as_str() {
+            "queued" => "排队中",
+            "downloading" => "下载中",
+            "verifying" => "校验文件",
+            "extracting" => "解压",
+            "stopping" => "停止内核",
+            "installing" => "安装",
+            "completed" => "已完成",
+            "failed" => "失败",
+            "cancelled" => "已取消",
+            _ => "准备中",
+        }
+    }
+}
+
 pub struct StatusUpdate {
     pub instance_id: String,
     pub node: Option<NodeInfo>,
     pub peers: Vec<Peer>,
-    pub routes: usize,
+    pub routes: Vec<Route>,
     pub error: Option<String>,
 }
 
@@ -99,6 +142,10 @@ pub enum Event {
     Status(StatusUpdate),
     Logs { instance_id: String, lines: Vec<String> },
     Action(ActionResult),
+    Kernel(KernelProgress),
+    Proxies(Vec<crate::settings::LocalProxy>),
+    Releases(Result<crate::settings::ReleaseInfo, String>),
+    Autostart(crate::settings::Autostart),
 }
 
 pub enum Action {
@@ -120,6 +167,20 @@ pub enum Action {
     Remove {
         id: String,
     },
+    KernelStart {
+        proxy: String,
+        target: Option<String>,
+    },
+    KernelCancel,
+    DetectProxies,
+    CheckReleases {
+        proxy: String,
+    },
+    AutostartGet,
+    AutostartSet {
+        enabled: bool,
+        minimized: bool,
+    },
 }
 
 pub fn spawn(ctx: egui::Context) -> (Sender<Action>, Receiver<Event>) {
@@ -135,12 +196,15 @@ struct LoopState {
     instances: Vec<Instance>,
     cfg_cache: Option<(SystemTime, Vec<InstanceCfg>)>,
     node: Option<NodeInfo>,
-    routes: usize,
+    routes: Vec<Route>,
+    kernel_task: Option<String>,
+    kernel_misses: u32,
     last_service: Option<Instant>,
     last_node: Option<Instant>,
     last_peers: Option<Instant>,
     last_routes: Option<Instant>,
     last_logs: Option<Instant>,
+    last_kernel: Option<Instant>,
 }
 
 impl LoopState {
@@ -151,12 +215,15 @@ impl LoopState {
             instances: Vec::new(),
             cfg_cache: None,
             node: None,
-            routes: 0,
+            routes: Vec::new(),
+            kernel_task: None,
+            kernel_misses: 0,
             last_service: None,
             last_node: None,
             last_peers: None,
             last_routes: None,
             last_logs: None,
+            last_kernel: None,
         }
     }
 
@@ -171,7 +238,7 @@ impl LoopState {
         self.last_routes = None;
         self.last_logs = None;
         self.node = None;
-        self.routes = 0;
+        self.routes.clear();
     }
 
     fn active_instance(&self) -> Option<&Instance> {
@@ -187,7 +254,7 @@ fn run(ctx: egui::Context, action_rx: Receiver<Action>, event_tx: Sender<Event>)
         loop {
             match action_rx.try_recv() {
                 Ok(action) => {
-                    if !apply_action(&mut st, action, &event_tx) {
+                    if !apply_action(&mut st, action, &event_tx, &ctx) {
                         return;
                     }
                     wake = true;
@@ -202,6 +269,12 @@ fn run(ctx: egui::Context, action_rx: Receiver<Action>, event_tx: Sender<Event>)
                 st.last_service = Some(Instant::now());
                 poll_service(&event_tx, &mut st);
             }
+            if st.kernel_task.is_some()
+                && LoopState::due(&st.last_kernel, Duration::from_millis(1000))
+            {
+                st.last_kernel = Some(Instant::now());
+                poll_kernel(&event_tx, &mut st);
+            }
             if let Some(inst) = st.active_instance().cloned() {
                 if inst.running() {
                     let portal = format!("127.0.0.1:{}", inst.rpc_port);
@@ -214,7 +287,7 @@ fn run(ctx: egui::Context, action_rx: Receiver<Action>, event_tx: Sender<Event>)
                     if LoopState::due(&st.last_routes, Duration::from_secs(6)) {
                         st.last_routes = Some(Instant::now());
                         if let Ok(routes) = cli_json(&portal, "route") {
-                            st.routes = value_list(&routes, "routes").len();
+                            st.routes = parse_routes(&routes);
                         }
                     }
                     if LoopState::due(&st.last_peers, Duration::from_secs(2)) {
@@ -227,7 +300,7 @@ fn run(ctx: egui::Context, action_rx: Receiver<Action>, event_tx: Sender<Event>)
                             instance_id: inst.id.clone(),
                             node: st.node.clone(),
                             peers,
-                            routes: st.routes,
+                            routes: st.routes.clone(),
                             error,
                         }));
                     }
@@ -262,7 +335,7 @@ fn run(ctx: egui::Context, action_rx: Receiver<Action>, event_tx: Sender<Event>)
         }
         match action_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(action) => {
-                if !apply_action(&mut st, action, &event_tx) {
+                if !apply_action(&mut st, action, &event_tx, &ctx) {
                     return;
                 }
             }
@@ -272,7 +345,12 @@ fn run(ctx: egui::Context, action_rx: Receiver<Action>, event_tx: Sender<Event>)
     }
 }
 
-fn apply_action(st: &mut LoopState, action: Action, event_tx: &Sender<Event>) -> bool {
+fn apply_action(
+    st: &mut LoopState,
+    action: Action,
+    event_tx: &Sender<Event>,
+    ctx: &egui::Context,
+) -> bool {
     match action {
         Action::SetVisible(visible) => {
             if st.visible != visible {
@@ -359,8 +437,193 @@ fn apply_action(st: &mut LoopState, action: Action, event_tx: &Sender<Event>) ->
             };
             let _ = event_tx.send(Event::Action(result));
         }
+        Action::KernelStart { proxy, target } => {
+            let payload = json!({
+                "proxy": proxy,
+                "target_version": target,
+            });
+            match pipe_request("update_kernel", &payload) {
+                Ok(data) => {
+                    let mut progress = parse_kernel(&data);
+                    if progress.task_id.is_empty() {
+                        progress.task_id = text_field(&data, "task_id");
+                    }
+                    st.kernel_task = Some(progress.task_id.clone());
+                    st.kernel_misses = 0;
+                    st.last_kernel = None;
+                    let _ = event_tx.send(Event::Kernel(progress));
+                }
+                Err(e) => {
+                    let _ = event_tx.send(Event::Action(ActionResult {
+                        label: "内核更新".to_owned(),
+                        ok: false,
+                        message: e,
+                    }));
+                }
+            }
+        }
+        Action::KernelCancel => {
+            let result = match pipe_request("cancel_kernel_update", &json!({})) {
+                Ok(_) => {
+                    st.kernel_task = None;
+                    let _ = event_tx.send(Event::Kernel(KernelProgress {
+                        status: "cancelled".to_owned(),
+                        phase: "cancelled".to_owned(),
+                        message: "已取消更新".to_owned(),
+                        ..Default::default()
+                    }));
+                    ActionResult {
+                        label: "取消更新".to_owned(),
+                        ok: true,
+                        message: "已请求取消".to_owned(),
+                    }
+                }
+                Err(e) => ActionResult {
+                    label: "取消更新".to_owned(),
+                    ok: false,
+                    message: e,
+                },
+            };
+            let _ = event_tx.send(Event::Action(result));
+        }
+        Action::DetectProxies => {
+            let tx = event_tx.clone();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let proxies = crate::settings::detect_local_proxies();
+                let _ = tx.send(Event::Proxies(proxies));
+                ctx.request_repaint();
+            });
+        }
+        Action::CheckReleases { proxy } => {
+            let tx = event_tx.clone();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let result = crate::settings::check_releases(&proxy);
+                let _ = tx.send(Event::Releases(result));
+                ctx.request_repaint();
+            });
+        }
+        Action::AutostartGet => {
+            let _ = event_tx.send(Event::Autostart(crate::settings::read_autostart()));
+        }
+        Action::AutostartSet { enabled, minimized } => {
+            let result = match crate::settings::write_autostart(enabled, minimized) {
+                Ok(_) => {
+                    let _ = event_tx.send(Event::Autostart(crate::settings::read_autostart()));
+                    ActionResult {
+                        label: "开机自启".to_owned(),
+                        ok: true,
+                        message: if enabled {
+                            "已注册开机自启动".to_owned()
+                        } else {
+                            "已取消开机自启动".to_owned()
+                        },
+                    }
+                }
+                Err(e) => ActionResult {
+                    label: "开机自启".to_owned(),
+                    ok: false,
+                    message: e,
+                },
+            };
+            let _ = event_tx.send(Event::Action(result));
+        }
     }
     true
+}
+
+fn poll_kernel(event_tx: &Sender<Event>, st: &mut LoopState) {
+    let Some(task_id) = st.kernel_task.clone() else {
+        return;
+    };
+    match pipe_request("get_task_status", &json!({ "task_id": task_id })) {
+        Ok(data) => {
+            st.kernel_misses = 0;
+            let progress = parse_kernel(&data);
+            if progress.terminal() {
+                st.kernel_task = None;
+            }
+            let _ = event_tx.send(Event::Kernel(progress));
+        }
+        Err(e) => {
+            if e.contains("task not found") || e.contains("不存在") {
+                st.kernel_task = None;
+                let _ = event_tx.send(Event::Kernel(KernelProgress {
+                    task_id,
+                    status: "failed".to_owned(),
+                    phase: "failed".to_owned(),
+                    message: "更新任务已失效（后台服务可能重启过）".to_owned(),
+                    ..Default::default()
+                }));
+                return;
+            }
+            st.kernel_misses = st.kernel_misses.saturating_add(1);
+            if st.kernel_misses >= 10 {
+                st.kernel_task = None;
+                let _ = event_tx.send(Event::Kernel(KernelProgress {
+                    task_id,
+                    status: "failed".to_owned(),
+                    phase: "failed".to_owned(),
+                    message: format!("无法查询更新进度：{e}"),
+                    ..Default::default()
+                }));
+            }
+        }
+    }
+}
+
+fn parse_kernel(value: &Value) -> KernelProgress {
+    let progress = value.get("progress");
+    let nested_text = |key: &str| -> String {
+        progress
+            .and_then(|p| p.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
+    let percent = {
+        let top = field_number(value, "percent");
+        if top > 0.0 {
+            top
+        } else {
+            progress
+                .and_then(|p| p.get("percent"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+        }
+    };
+    let phase = {
+        let phase = text_field(value, "phase");
+        if phase.is_empty() {
+            nested_text("phase")
+        } else {
+            phase
+        }
+    };
+    let mut status = text_field(value, "status");
+    if status.is_empty() {
+        status = phase.clone();
+    }
+    let mut message = text_field(value, "message");
+    if message.is_empty() {
+        message = nested_text("message");
+    }
+    KernelProgress {
+        task_id: text_field(value, "task_id"),
+        status,
+        phase,
+        percent,
+        downloaded: value
+            .get("downloaded_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        total: value
+            .get("total_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        message,
+    }
 }
 
 fn handle_set_running(
@@ -388,6 +651,7 @@ fn handle_set_running(
             st.last_peers = None;
             st.last_node = None;
             st.last_routes = None;
+            st.routes.clear();
             let _ = event_tx.send(Event::Action(ActionResult {
                 label: label.to_owned(),
                 ok: true,
@@ -720,6 +984,34 @@ fn parse_peers(value: &Value) -> Vec<Peer> {
             tunnel: text_field(p, "tunnel_proto"),
             id: text_field(p, "id"),
             version: text_field(p, "version"),
+        })
+        .collect()
+}
+
+fn parse_routes(value: &Value) -> Vec<Route> {
+    value_list(value, "routes")
+        .iter()
+        .map(|r| {
+            let next_host = text_field(r, "next_hop_hostname");
+            let next_ip = text_field(r, "next_hop_ipv4");
+            Route {
+                ipv4: text_field(r, "ipv4"),
+                hostname: text_field(r, "hostname"),
+                proxy_cidrs: r
+                    .get("proxy_cidrs")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                next_hop: if next_host.is_empty() { next_ip } else { next_host },
+                hops: field_number(r, "path_len"),
+                latency: field_number(r, "path_latency"),
+                version: text_field(r, "version"),
+            }
         })
         .collect()
 }
