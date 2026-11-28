@@ -1,0 +1,81 @@
+name: Native UI Package (spike)
+
+on:
+  workflow_dispatch:
+    inputs:
+      easytier_version:
+        description: EasyTier core release version (without leading v)
+        default: '2.6.4'
+        required: true
+        type: string
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            native-ui
+            src-tauri
+
+      - name: Install protoc
+        run: choco install protoc -y
+
+      - name: Download EasyTier core
+        shell: pwsh
+        run: |
+          $version = '${{ inputs.easytier_version }}'
+          $asset = 'easytier-windows-x86_64-v' + $version + '.zip'
+          $url = 'https://github.com/EasyTier/EasyTier/releases/download/v' + $version + '/' + $asset
+          New-Item -ItemType Directory -Force -Path core-stage | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile easytier-core.zip
+          Expand-Archive -Path easytier-core.zip -DestinationPath core-expanded -Force
+          $core = Get-ChildItem -Path core-expanded -Recurse -Filter easytier-core.exe | Select-Object -First 1
+          if (-not $core) { throw 'easytier-core.exe not found in downloaded archive' }
+          Copy-Item -Path ($core.DirectoryName + '/*') -Destination core-stage -Recurse -Force
+          foreach ($required in @('easytier-core.exe','easytier-cli.exe','wintun.dll','WinDivert64.sys','Packet.dll')) {
+            if (-not (Test-Path "core-stage/$required")) { throw "Missing runtime file: $required" }
+          }
+
+      - name: Stage easytier third_party link libs
+        shell: pwsh
+        run: |
+          cargo fetch --manifest-path src-tauri/Cargo.toml
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $tp = Resolve-Path "$cargoHome\git\checkouts\easytier-*\*\easytier\third_party" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $tp) { throw 'easytier third_party not found in cargo git checkouts' }
+          New-Item -ItemType Directory -Force -Path src-tauri/easytier | Out-Null
+          Copy-Item -Recurse -Force -Path $tp.Path -Destination src-tauri/easytier/third_party
+          if (-not (Test-Path 'src-tauri/easytier/third_party/x86_64/Packet.lib')) { throw 'Missing link lib: x86_64/Packet.lib' }
+
+      - name: Build service binary
+        run: cargo build --release --target x86_64-pc-windows-msvc --manifest-path src-tauri/Cargo.toml --bin easytier-service
+
+      - name: Build native UI
+        run: cargo build --release --target x86_64-pc-windows-msvc --manifest-path native-ui/Cargo.toml
+
+      - name: Assemble portable package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-artifacts | Out-Null
+          $bundle = 'easytier-native-ui_x64_portable'
+          New-Item -ItemType Directory -Force -Path "$bundle/core" | Out-Null
+          Copy-Item 'native-ui/target/x86_64-pc-windows-msvc/release/easytier-native-ui.exe' "$bundle/easytier-native-ui.exe"
+          Copy-Item 'src-tauri/target/x86_64-pc-windows-msvc/release/easytier-service.exe' "$bundle/easytier-service.exe"
+          Copy-Item 'core-stage/*' "$bundle/core" -Recurse -Force
+          Compress-Archive -Path "$bundle/*" -DestinationPath "dist-artifacts/$bundle.zip" -Force
+          $zip = Get-Item "dist-artifacts/$bundle.zip"
+          Write-Host ("Portable package: {0} ({1:N1} MB)" -f $zip.Name, ($zip.Length / 1MB))
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easytier-native-ui-package-x64
+          path: dist-artifacts/*.zip
+          if-no-files-found: error
