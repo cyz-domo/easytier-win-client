@@ -11,6 +11,7 @@ use eframe::egui::{
 use serde_json::json;
 
 mod config;
+mod public_nodes;
 mod service;
 mod settings;
 mod theme;
@@ -202,11 +203,9 @@ fn classify_log(line: &str) -> LogLine {
     let mut parts = trimmed.splitn(3, char::is_whitespace);
     if let (Some(stamp), Some(level), Some(rest)) = (parts.next(), parts.next(), parts.next()) {
         if stamp.len() >= 19 && stamp.contains(['T', '-']) && level.chars().all(|c| c.is_ascii_uppercase()) {
-            let time = if let Some(t) = stamp.get(11..19) {
-                t.to_owned()
-            } else {
-                stamp.to_owned()
-            };
+            let time = local_hms(stamp).unwrap_or_else(|| {
+                stamp.get(11..19).unwrap_or(stamp).to_owned()
+            });
             let mut level = level.to_owned();
             if level == "INFO" && looks_like_error(rest) {
                 level = "ERROR".to_owned();
@@ -237,6 +236,76 @@ fn classify_log(line: &str) -> LogLine {
     }
 }
 
+fn local_hms(stamp: &str) -> Option<String> {
+    let body = stamp.trim_end_matches('Z');
+    let naive = chrono::NaiveDateTime::parse_from_str(body, "%Y-%m-%dT%H:%M:%S%.f").ok()?;
+    let utc = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc);
+    Some(
+        utc.with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string(),
+    )
+}
+
+fn start_public_fetch(picker: &mut PublicPicker) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(public_nodes::fetch());
+    });
+    picker.rx = Some(rx);
+}
+
+fn render_public_node(
+    ui: &mut egui::Ui,
+    node: &public_nodes::PublicNode,
+    existing: &[String],
+    add: &mut Option<String>,
+) {
+    let already = existing.iter().any(|u| u == &node.address);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(truncate(&node.name, 26))
+                .size(11.5)
+                .color(if node.online { TEXT } else { DIM }),
+        );
+        ui.label(RichText::new(&node.address).monospace().size(10.0).color(MUTED));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if already {
+                ui.label(RichText::new("已添加").size(10.0).color(DIM));
+            } else if ui.small_button("添加").clicked() {
+                *add = Some(node.address.clone());
+            }
+            let ping = match node.local_ping {
+                Some(ms) if ms >= 2 => format!("{ms} ms"),
+                _ => "—".to_owned(),
+            };
+            let ping_color = match node.local_ping {
+                Some(ms) if ms < 100 => RX,
+                Some(ms) if ms < 250 => WARN,
+                _ => MUTED,
+            };
+            ui.label(RichText::new(ping).size(10.0).color(ping_color));
+            if node.official {
+                ui.label(RichText::new("官方").size(9.5).color(ACCENT));
+            }
+            if !node.online {
+                ui.label(RichText::new("离线").size(9.5).color(DIM));
+            }
+            if node.masked {
+                ui.label(RichText::new("掩码").size(9.5).color(DIM));
+            }
+            if node.can_relay {
+                ui.label(RichText::new("中转").size(9.5).color(MUTED));
+            }
+        });
+    });
+}
+
+fn is_public_peer(p: &service::Peer) -> bool {
+    let h = p.hostname.to_lowercase();
+    h.starts_with("publicserver") || h.starts_with("public_") || h.contains("公共节点")
+}
+
 fn looks_like_error(text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("error") || lower.contains("fail") || lower.contains("panic") || text.contains("TunnelError")
@@ -249,10 +318,18 @@ struct NewDialog {
     dhcp: bool,
 }
 
+struct PublicPicker {
+    rx: Option<Receiver<Result<Vec<public_nodes::PublicNode>, String>>>,
+    nodes: Vec<public_nodes::PublicNode>,
+    error: Option<String>,
+    query: String,
+}
+
 struct App {
     tab: Tab,
     search: String,
     peer_query: String,
+    show_public_peers: bool,
     config: config::NetworkConfig,
     config_dirty: bool,
     config_source: String,
@@ -267,6 +344,7 @@ struct App {
     whitelist_text: String,
     console_level: String,
     new_dialog: Option<NewDialog>,
+    public_picker: Option<PublicPicker>,
     confirm_delete: Option<(String, String)>,
     pending_active: Option<String>,
     peers: Vec<service::Peer>,
@@ -333,6 +411,7 @@ impl App {
             tab: Tab::Status,
             search: String::new(),
             peer_query: String::new(),
+            show_public_peers: false,
             config: config::NetworkConfig::default(),
             config_dirty: false,
             config_source: String::new(),
@@ -347,6 +426,7 @@ impl App {
             whitelist_text: String::new(),
             console_level: String::new(),
             new_dialog: None,
+            public_picker: None,
             confirm_delete: None,
             pending_active: None,
             peers: Vec::new(),
@@ -687,6 +767,24 @@ impl App {
         });
     }
 
+    fn open_public_picker(&mut self) {
+        let mut picker = PublicPicker {
+            rx: None,
+            nodes: Vec::new(),
+            error: None,
+            query: String::new(),
+        };
+        start_public_fetch(&mut picker);
+        self.public_picker = Some(picker);
+    }
+
+    fn refresh_public_picker(&mut self) {
+        if let Some(picker) = self.public_picker.as_mut() {
+            picker.error = None;
+            start_public_fetch(picker);
+        }
+    }
+
     fn next_rpc_port(&self) -> Option<u16> {
         let used: Vec<u16> = self.instances.iter().map(|i| i.rpc_port).collect();
         for port in 15888u16..16888 {
@@ -930,6 +1028,109 @@ impl App {
                 self.delete_instance(ctx);
             } else if cancel {
                 self.confirm_delete = None;
+            }
+        }
+
+        if self.public_picker.is_some() {
+            let mut refresh = false;
+            let mut close = false;
+            let mut add_addr: Option<String> = None;
+            {
+                let picker = self.public_picker.as_mut().expect("checked");
+                if let Some(rx) = &picker.rx {
+                    if let Ok(result) = rx.try_recv() {
+                        picker.rx = None;
+                        match result {
+                            Ok(nodes) => {
+                                picker.nodes = nodes;
+                                picker.error = None;
+                            }
+                            Err(e) => picker.error = Some(e),
+                        }
+                    }
+                }
+                egui::Window::new("添加公共节点")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                    .show(ctx, |ui| {
+                        ui.set_width(560.0);
+                        ui.horizontal(|ui| {
+                            ui.add_sized(
+                                [260.0, 26.0],
+                                egui::TextEdit::singleline(&mut picker.query)
+                                    .hint_text("搜索节点名称 / 地址"),
+                            );
+                            if ui.button("刷新").clicked() {
+                                refresh = true;
+                            }
+                            if picker.rx.is_some() {
+                                ui.spinner();
+                                ui.label(RichText::new("正在拉取并测速…").size(10.5).color(DIM));
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("关闭").clicked() {
+                                        close = true;
+                                    }
+                                },
+                            );
+                        });
+                        if let Some(err) = &picker.error {
+                            ui.label(RichText::new(format!("拉取失败：{err}")).size(10.5).color(WARN));
+                        }
+                        ui.add_space(6.0);
+                        let q = picker.query.trim().to_lowercase();
+                        let filtered: Vec<usize> = picker
+                            .nodes
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, n)| {
+                                q.is_empty()
+                                    || n.name.to_lowercase().contains(&q)
+                                    || n.address.to_lowercase().contains(&q)
+                            })
+                            .map(|(i, _)| i)
+                            .collect();
+                        if picker.nodes.is_empty() && picker.rx.is_none() && picker.error.is_none() {
+                            ui.label(RichText::new("暂无节点列表").size(11.0).color(DIM));
+                        }
+                        ScrollArea::vertical()
+                            .id_salt("public-node-list")
+                            .max_height(360.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for section in [false, true] {
+                                    let label = if section { "海外节点" } else { "国内节点" };
+                                    let mut section_nodes = filtered
+                                        .iter()
+                                        .map(|&i| &picker.nodes[i])
+                                        .filter(|n| n.overseas == section);
+                                    let first = section_nodes.next();
+                                    let Some(first) = first else { continue };
+                                    ui.add_space(4.0);
+                                    ui.label(RichText::new(label).size(11.0).color(DIM));
+                                    render_public_node(ui, first, &self.config.peer_urls, &mut add_addr);
+                                    for node in section_nodes {
+                                        render_public_node(ui, node, &self.config.peer_urls, &mut add_addr);
+                                    }
+                                }
+                            });
+                    });
+            }
+            if refresh {
+                self.refresh_public_picker();
+            }
+            if close {
+                self.public_picker = None;
+            }
+            if let Some(addr) = add_addr {
+                if !self.config.peer_urls.contains(&addr) {
+                    self.config.peer_urls.push(addr);
+                    self.config_dirty = true;
+                    self.peer_urls_open = true;
+                }
             }
         }
     }
@@ -1536,6 +1737,7 @@ impl App {
         let box_w = 200.0;
         let box_r = Rect::from_min_size(Pos2::new(shead.right() - box_w, shead.center().y - 14.0), Vec2::new(box_w, 28.0));
         ui.put(box_r, egui::TextEdit::singleline(&mut self.peer_query).hint_text("搜索成员 / IP"));
+        self.public_peer_toggle(ui, box_r.left() - 10.0, shead.center().y);
 
         ui.add_space(8.0);
         let (th, _) = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::hover());
@@ -1624,9 +1826,16 @@ impl App {
             }
         }
 
-        if self.peers.is_empty() && running && self.status_error.is_none() {
+        if running && self.status_error.is_none() && self.visible_peers().is_empty() {
             let (row, _) = ui.allocate_exact_size(Vec2::new(w, 46.0), Sense::hover());
-            txt(&p, Pos2::new(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, "等待内核返回成员数据…", 11.5, DIM);
+            let message = if self.peers.is_empty() {
+                "等待内核返回成员数据…"
+            } else if !self.show_public_peers {
+                "仅剩公共节点（已隐藏），点击右侧「显示公共节点」查看"
+            } else {
+                "当前筛选条件下没有成员"
+            };
+            txt(&p, Pos2::new(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, message, 11.5, DIM);
         }
     }
 
@@ -1636,13 +1845,38 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, p)| {
-                q.is_empty()
-                    || p.hostname.to_lowercase().contains(&q)
-                    || p.ip.contains(&q)
-                    || p.id.to_lowercase().contains(&q)
+                (self.show_public_peers || !is_public_peer(p))
+                    && (q.is_empty()
+                        || p.hostname.to_lowercase().contains(&q)
+                        || p.ip.contains(&q)
+                        || p.id.to_lowercase().contains(&q))
             })
             .map(|(i, _)| i)
             .collect()
+    }
+
+    fn public_peer_toggle(&mut self, ui: &mut egui::Ui, right_x: f32, center_y: f32) {
+        let n = self.peers.iter().filter(|p| is_public_peer(p)).count();
+        if n == 0 {
+            return;
+        }
+        let label = if self.show_public_peers {
+            format!("隐藏公共节点 ({n})")
+        } else {
+            format!("显示公共节点 ({n})")
+        };
+        let tw = text_w(&label, 10.5) + 14.0;
+        let r = Rect::from_min_size(Pos2::new(right_x - tw, center_y - 12.0), Vec2::new(tw, 24.0));
+        let resp = ui.put(
+            r,
+            egui::Button::new(RichText::new(label).size(10.5).color(MUTED)).frame(false),
+        );
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            self.show_public_peers = !self.show_public_peers;
+        }
     }
 
     fn peers_tab(&mut self, ui: &mut egui::Ui) {
@@ -1661,6 +1895,7 @@ impl App {
         let box_w = 220.0;
         let box_r = Rect::from_min_size(Pos2::new(head.right() - box_w, head.center().y - 14.0), Vec2::new(box_w, 28.0));
         ui.put(box_r, egui::TextEdit::singleline(&mut self.peer_query).hint_text("搜索成员 / IP / 节点 ID"));
+        self.public_peer_toggle(ui, box_r.left() - 10.0, head.center().y);
 
         ui.add_space(10.0);
         if !running {
@@ -1738,6 +1973,8 @@ impl App {
             let (row, _) = ui.allocate_exact_size(Vec2::new(w, 46.0), Sense::hover());
             let message = if self.peers.is_empty() {
                 "等待内核返回成员数据…"
+            } else if !self.show_public_peers {
+                "仅剩公共节点（已隐藏），点击右侧「显示公共节点」查看"
             } else {
                 "当前筛选条件下没有成员"
             };
@@ -2193,6 +2430,7 @@ impl App {
         let mut show_advanced = self.show_advanced;
         let mut secret_visible = self.secret_visible;
         let mut changed = false;
+        let mut open_picker = false;
 
         if let Some(err) = self.config_error.clone() {
             card_frame().show(ui, |ui| {
@@ -2264,17 +2502,23 @@ impl App {
             });
             if cfg.networking_method != 2 {
                 let toggle = if self.peer_urls_open { "收起" } else { "展开" };
-                let header = ui.add(
-                    egui::Button::new(
-                        RichText::new(format!("公共服务器（{}） · {toggle}", cfg.peer_urls.len()))
-                            .size(11.5)
-                            .color(MUTED),
-                    )
-                    .frame(false),
-                );
-                if header.clicked() {
-                    self.peer_urls_open = !self.peer_urls_open;
-                }
+                ui.horizontal(|ui| {
+                    let header = ui.add(
+                        egui::Button::new(
+                            RichText::new(format!("公共服务器（{}） · {toggle}", cfg.peer_urls.len()))
+                                .size(11.5)
+                                .color(MUTED),
+                        )
+                        .frame(false),
+                    );
+                    if header.clicked() {
+                        self.peer_urls_open = !self.peer_urls_open;
+                    }
+                    ui.add_space(4.0);
+                    if ui.small_button("浏览公共节点").clicked() {
+                        open_picker = true;
+                    }
+                });
                 if self.peer_urls_open {
                     changed |= string_list(ui, &mut cfg.peer_urls, "tcp://192.168.1.10:11010");
                 }
@@ -2636,6 +2880,9 @@ impl App {
         self.secret_visible = secret_visible;
         if changed {
             self.config_dirty = true;
+        }
+        if open_picker {
+            self.open_public_picker();
         }
         if copy_clicked {
             let mut copy = self.config.clone();
