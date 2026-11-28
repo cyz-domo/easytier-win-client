@@ -1670,6 +1670,7 @@ impl App {
         p.hline(th.x_range(), th.bottom() - 0.5, Stroke::new(1.0, BORDER));
 
         let idxs = self.visible_peers();
+        let shown = idxs.len();
         let peers = self.peers.clone();
         for i in idxs {
             let peer = &peers[i];
@@ -1711,9 +1712,14 @@ impl App {
             p.hline(row.x_range(), row.bottom() - 0.5, Stroke::new(1.0, Color32::from_rgb(0x26, 0x2A, 0x30)));
         }
 
-        if self.peers.is_empty() && self.status_error.is_none() {
+        if self.status_error.is_none() && (self.peers.is_empty() || shown == 0) {
             let (row, _) = ui.allocate_exact_size(Vec2::new(w, 46.0), Sense::hover());
-            txt(&p, Pos2::new(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, "等待内核返回成员数据…", 11.5, DIM);
+            let message = if self.peers.is_empty() {
+                "等待内核返回成员数据…"
+            } else {
+                "当前筛选条件下没有成员"
+            };
+            txt(&p, Pos2::new(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, message, 11.5, DIM);
         }
     }
 
@@ -1835,12 +1841,17 @@ impl App {
 
         ui.add_space(8.0);
         let current_kernel = self.node.as_ref().map(|n| n.version.clone()).unwrap_or_default();
+        let kernel_running = self.active_running();
         card_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("内核版本管理").size(14.0).color(TEXT));
                 ui.add_space(8.0);
                 let current = if current_kernel.is_empty() {
-                    "当前内核：未知（启动网络后读取）".to_owned()
+                    if kernel_running {
+                        "当前内核：读取中…".to_owned()
+                    } else {
+                        "当前内核：未知（启动网络后读取）".to_owned()
+                    }
                 } else {
                     format!("当前内核：{current_kernel}")
                 };
