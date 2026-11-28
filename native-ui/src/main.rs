@@ -398,6 +398,7 @@ fn public_node_title(node: &public_nodes::PublicNode) -> String {
             .unwrap_or(title.len());
         title.replace_range(start..end, "");
     }
+    strip_marker_groups(&mut title);
     let cleaned = title
         .trim_matches(|c: char| c.is_whitespace() || "（）()【】[]·-/|:：".contains(c))
         .trim();
@@ -410,6 +411,28 @@ fn public_node_title(node: &public_nodes::PublicNode) -> String {
         host.to_owned()
     } else {
         cleaned.to_owned()
+    }
+}
+
+fn strip_marker_groups(s: &mut String) {
+    for (open, close) in [('[', ']'), ('【', '】')] {
+        let mut from = 0;
+        while let Some(rel) = s[from..].find(open) {
+            let start = from + rel;
+            let Some(end_rel) = s[start..].find(close) else {
+                break;
+            };
+            let end = start + end_rel + close.len_utf8();
+            let inner = &s[start + open.len_utf8()..start + end_rel];
+            let short_cjk = inner.chars().count() <= 4
+                && inner.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+            if short_cjk {
+                s.replace_range(start..end, "");
+                from = start;
+            } else {
+                from = end;
+            }
+        }
     }
 }
 
@@ -464,7 +487,7 @@ fn public_node_card(
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if already {
-                            chip(ui, "✓ 已添加", DIM, Color32::from_white_alpha(8));
+                            chip(ui, "√ 已添加", DIM, Color32::from_white_alpha(8));
                         } else {
                             let btn = egui::Button::new(
                                 RichText::new("＋ 添加").size(11.0).color(Color32::WHITE),
@@ -682,6 +705,8 @@ fn zero_history() -> VecDeque<(f32, f32)> {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, start_hidden: bool) -> Self {
         let (font_loaded, style) = theme::setup(&cc.egui_ctx);
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+        cc.egui_ctx.set_style_of(egui::Theme::Dark, style.clone());
         let (icon_w, icon_h, icon_rgba) = app_icon();
         let icon_tex = cc.egui_ctx.load_texture(
             "app-icon",
@@ -1200,7 +1225,7 @@ impl App {
     fn dialogs(&mut self, ctx: &egui::Context) {
         if self.new_dialog.is_some() {
             let mut create = false;
-            let mut cancel = false;
+            let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
             {
                 let dlg = self.new_dialog.as_mut().expect("checked");
                 modal_scrim(ctx, "scrim-new-instance");
@@ -1308,7 +1333,10 @@ impl App {
                             let ghost = egui::Button::new(
                                 RichText::new("取消").size(12.0).color(MUTED),
                             )
-                            .frame(false);
+                            .fill(Color32::from_white_alpha(6))
+                            .stroke(Stroke::new(1.0, BORDER))
+                            .corner_radius(CornerRadius::same(8))
+                            .min_size(Vec2::new(72.0, 30.0));
                             if ui.add(ghost).clicked() {
                                 cancel = true;
                             }
@@ -1341,7 +1369,7 @@ impl App {
 
         if let Some((_id, name)) = self.confirm_delete.clone() {
             let mut confirmed = false;
-            let mut cancel = false;
+            let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
             modal_scrim(ctx, "scrim-delete-instance");
             egui::Window::new("##delete-instance-dialog")
                 .title_bar(false)
@@ -1368,7 +1396,10 @@ impl App {
                         let ghost = egui::Button::new(
                             RichText::new("取消").size(12.0).color(MUTED),
                         )
-                        .frame(false);
+                        .fill(Color32::from_white_alpha(6))
+                        .stroke(Stroke::new(1.0, BORDER))
+                        .corner_radius(CornerRadius::same(8))
+                        .min_size(Vec2::new(72.0, 30.0));
                         if ui.add(ghost).clicked() {
                             cancel = true;
                         }
@@ -1400,7 +1431,7 @@ impl App {
 
         if self.public_picker.is_some() {
             let mut refresh = false;
-            let mut close = false;
+            let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
             let mut add_addr: Option<String> = None;
             {
                 let picker = self.public_picker.as_mut().expect("checked");
