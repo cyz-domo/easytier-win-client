@@ -17,7 +17,7 @@ mod settings;
 mod theme;
 use theme::*;
 
-const VERSION: &str = "v0.1.5";
+const VERSION: &str = concat!("v", env!("EASYTIER_APP_VERSION"));
 
 fn app_icon() -> (u32, u32, Vec<u8>) {
     static ICON: &[u8] = include_bytes!("../assets/icon.png");

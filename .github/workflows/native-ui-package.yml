@@ -77,6 +77,8 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} --manifest-path src-tauri/Cargo.toml --bin easytier-service
 
       - name: Build native UI
+        env:
+          EASYTIER_APP_VERSION: ${{ inputs.app_version }}
         run: cargo build --release --target ${{ matrix.target }} --manifest-path native-ui/Cargo.toml
 
       - name: Assemble portable package
@@ -99,10 +101,14 @@ jobs:
           if (-not (Test-Path $makensis)) { choco install nsis -y; $makensis = 'C:\Program Files (x86)\NSIS\makensis.exe' }
           if (-not (Test-Path $makensis)) { throw 'makensis.exe not found' }
           New-Item -ItemType Directory -Force -Path dist-stage | Out-Null
+          New-Item -ItemType Directory -Force -Path dist-stage/core | Out-Null
           $stage = (Resolve-Path 'dist-stage').Path
           Copy-Item "native-ui/target/${{ matrix.target }}/release/easytier-native-ui.exe" 'dist-stage/easytier-native-ui.exe'
           Copy-Item "src-tauri/target/${{ matrix.target }}/release/easytier-service.exe" 'dist-stage/easytier-service.exe'
           Copy-Item 'core-stage/*' 'dist-stage/core' -Recurse -Force
+          foreach ($required in @('easytier-core.exe','easytier-cli.exe','wintun.dll','WinDivert64.sys','Packet.dll')) {
+            if (-not (Test-Path "dist-stage/core/$required")) { throw "Missing installer runtime file: $required" }
+          }
           $out = (Join-Path (Resolve-Path 'dist-artifacts').Path 'EasyTier-Native-${{ inputs.app_version }}-${{ matrix.arch }}-setup.exe')
           $icon = (Resolve-Path 'native-ui/assets/icon.ico').Path
           & $makensis "/DAPP_VERSION=${{ inputs.app_version }}" "/DARCH=${{ matrix.arch }}" "/DSTAGE=$stage" "/DOUTFILE=$out" "/DICON=$icon" 'native-ui/installer/installer.nsi'
