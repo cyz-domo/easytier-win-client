@@ -60,7 +60,7 @@ mod tray {
         Icon::from_rgba(rgba, N, N).expect("valid tray icon")
     }
 
-    pub fn setup(ctx: &egui::Context) -> Option<TrayIcon> {
+    pub fn setup(ctx: &eframe::egui::Context) -> Option<TrayIcon> {
         let menu = Menu::new();
         let show = MenuItem::new("显示主界面", true, None);
         let quit = MenuItem::new("退出", true, None);
