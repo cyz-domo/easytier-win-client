@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use eframe::egui;
 use serde_json::{json, Value};
 
 const PIPE: &str = r"\\.\pipe\EasyTierService";
@@ -708,7 +709,7 @@ pub fn config_fields(toml_text: &str) -> ConfigFields {
         dhcp: true,
         ..Default::default()
     };
-    let Ok(document) = toml_text(toml_text) else {
+    let Ok(document) = parse_toml(toml_text) else {
         return fields;
     };
     fields.dhcp = document
@@ -750,7 +751,7 @@ pub fn config_fields(toml_text: &str) -> ConfigFields {
     fields
 }
 
-fn toml_text(text: &str) -> Result<toml::Table, String> {
+fn parse_toml(text: &str) -> Result<toml::Table, String> {
     text.parse::<toml::Table>()
         .map_err(|e| format!("配置解析失败：{e}"))
 }
@@ -760,7 +761,7 @@ fn listener_port(listener: &str) -> Option<u16> {
 }
 
 pub fn patch_config(toml_text: &str, fields: &ConfigFields) -> Result<String, String> {
-    let mut document = toml_text(toml_text)?;
+    let mut document = parse_toml(toml_text)?;
     if fields.dhcp {
         document.remove("ipv4");
     } else if !fields.ipv4.trim().is_empty() {
@@ -818,20 +819,21 @@ pub fn patch_config(toml_text: &str, fields: &ConfigFields) -> Result<String, St
         } else if old_port != Some(fields.port) {
             let old = old_port.unwrap_or(fields.port);
             for listener in listeners.iter_mut() {
-                if let toml::Value::String(s) = listener {
-                    let Some(port) = listener_port(s) else {
-                        continue;
-                    };
-                    let target = if port == old {
-                        Some(fields.port)
-                    } else if s.starts_with("wg://") && port == old.saturating_add(1) {
-                        Some(fields.port.saturating_add(1))
-                    } else {
-                        None
-                    };
-                    if let (Some(target), Some((head, _))) = (target, s.rsplit_once(':')) {
-                        *s = format!("{head}:{target}");
-                    }
+                let toml::Value::String(text) = listener else {
+                    continue;
+                };
+                let Some(port) = listener_port(text.as_str()) else {
+                    continue;
+                };
+                let target = if port == old {
+                    Some(fields.port)
+                } else if text.starts_with("wg://") && port == old.saturating_add(1) {
+                    Some(fields.port.saturating_add(1))
+                } else {
+                    None
+                };
+                if let (Some(target), Some((head, _))) = (target, text.rsplit_once(':')) {
+                    *text = format!("{head}:{target}");
                 }
             }
         }

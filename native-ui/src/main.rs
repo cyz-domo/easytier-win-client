@@ -765,12 +765,21 @@ impl App {
         }
 
         let button = Rect::from_min_size(Pos2::new(tabs.left() - 108.0, rect.center().y - 14.0), Vec2::new(98.0, 28.0));
+        let observed = self
+            .active_instance()
+            .map(|i| i.observed.clone())
+            .unwrap_or_default();
+        let transitioning = matches!(observed.as_str(), "starting" | "stopping");
         let has_instance = self.active_instance().is_some();
-        let enabled = has_instance && self.busy.is_none();
+        let enabled = has_instance && self.busy.is_none() && !transitioning;
         let running = self.active_running();
         let resp = ui.interact(button, egui::Id::new("run-toggle"), if enabled { Sense::click() } else { Sense::hover() });
         let label = if let Some(busy) = self.busy {
             busy
+        } else if observed == "starting" {
+            "启动中…"
+        } else if observed == "stopping" {
+            "停止中…"
         } else if running {
             "停止网络"
         } else {
