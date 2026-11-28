@@ -255,8 +255,8 @@ fn start_public_fetch(picker: &mut PublicPicker) {
     picker.rx = Some(rx);
 }
 
-fn glass_window_frame(ctx: &egui::Context) -> egui::Frame {
-    egui::Frame::window(&ctx.style())
+fn glass_window_frame() -> egui::Frame {
+    egui::Frame::window(&egui::Style::default())
         .fill(Color32::from_rgba_unmultiplied(0x24, 0x28, 0x2F, 246))
         .stroke(Stroke::new(1.0, Color32::from_white_alpha(28)))
         .corner_radius(CornerRadius::same(16))
@@ -268,7 +268,7 @@ fn modal_scrim(ctx: &egui::Context, id: &str) {
         .order(egui::Order::Middle)
         .fixed_pos(Pos2::ZERO)
         .show(ctx, |ui| {
-            let rect = ctx.screen_rect();
+            let rect = ctx.content_rect();
             ui.painter()
                 .rect_filled(rect, 0.0, Color32::from_black_alpha(110));
             ui.allocate_rect(rect, Sense::click());
@@ -325,7 +325,9 @@ fn field_label(ui: &mut egui::Ui, text: &str) {
 }
 
 fn text_input(ui: &mut egui::Ui, value: &mut String, hint: &str, password: bool) {
-    let mut edit = egui::TextEdit::singleline(value).frame(false).hint_text(hint);
+    let mut edit = egui::TextEdit::singleline(value)
+        .frame(egui::Frame::NONE)
+        .hint_text(hint);
     if password {
         edit = edit.password(true);
     }
@@ -1208,7 +1210,7 @@ impl App {
                     .resizable(false)
                     .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
                     .order(egui::Order::Foreground)
-                    .frame(glass_window_frame(ctx))
+                    .frame(glass_window_frame())
                     .show(ctx, |ui| {
                         ui.set_width(430.0);
                         modal_header(
@@ -1347,7 +1349,7 @@ impl App {
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
                 .order(egui::Order::Foreground)
-                .frame(glass_window_frame(ctx))
+                .frame(glass_window_frame())
                 .show(ctx, |ui| {
                     ui.set_width(380.0);
                     modal_header(ui, "删除网络实例", "该操作不可撤销", &mut cancel);
@@ -1421,7 +1423,7 @@ impl App {
                     .resizable(false)
                     .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
                     .order(egui::Order::Foreground)
-                    .frame(glass_window_frame(ctx))
+                    .frame(glass_window_frame())
                     .show(ctx, |ui| {
                         ui.set_width(600.0);
                         let subtitle = if picker.nodes.is_empty() {
