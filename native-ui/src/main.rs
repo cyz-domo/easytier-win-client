@@ -10,6 +10,7 @@ use eframe::egui::{
 };
 use serde_json::json;
 
+mod config;
 mod service;
 mod theme;
 use theme::*;
@@ -211,13 +212,32 @@ fn looks_like_error(text: &str) -> bool {
     lower.contains("error") || lower.contains("fail") || lower.contains("panic") || text.contains("TunnelError")
 }
 
+struct NewDialog {
+    name: String,
+    secret: String,
+    method: u8,
+    dhcp: bool,
+}
+
 struct App {
     tab: Tab,
     search: String,
     peer_query: String,
-    config: service::ConfigFields,
+    config: config::NetworkConfig,
     config_dirty: bool,
     config_source: String,
+    config_error: Option<String>,
+    show_advanced: bool,
+    secret_visible: bool,
+    instance_name: String,
+    rpc_port_text: String,
+    auto_start: bool,
+    remote_manage: bool,
+    whitelist_text: String,
+    console_level: String,
+    new_dialog: Option<NewDialog>,
+    confirm_delete: Option<(String, String)>,
+    pending_active: Option<String>,
     peers: Vec<service::Peer>,
     selected_peer: Option<usize>,
     history: VecDeque<(f32, f32)>,
@@ -260,9 +280,21 @@ impl App {
             tab: Tab::Status,
             search: String::new(),
             peer_query: String::new(),
-            config: service::ConfigFields::default(),
+            config: config::NetworkConfig::default(),
             config_dirty: false,
             config_source: String::new(),
+            config_error: None,
+            show_advanced: false,
+            secret_visible: false,
+            instance_name: String::new(),
+            rpc_port_text: String::new(),
+            auto_start: false,
+            remote_manage: false,
+            whitelist_text: String::new(),
+            console_level: String::new(),
+            new_dialog: None,
+            confirm_delete: None,
+            pending_active: None,
             peers: Vec::new(),
             selected_peer: None,
             history: zero_history(),
@@ -328,6 +360,13 @@ impl App {
         self.logs.clear();
         self.config_dirty = false;
         self.config_source.clear();
+        self.instance_name.clear();
+        self.rpc_port_text.clear();
+        self.auto_start = false;
+        self.remote_manage = false;
+        self.whitelist_text.clear();
+        self.console_level.clear();
+        self.config_error = None;
     }
 
     fn ensure_config(&mut self) {
@@ -340,7 +379,26 @@ impl App {
         if inst.config_toml.is_empty() || inst.config_toml == self.config_source {
             return;
         }
-        self.config = service::config_fields(&inst.config_toml);
+        match config::decode_toml(&inst.config_toml) {
+            Ok(mut cfg) => {
+                cfg.instance_id = inst.id.clone();
+                self.config = cfg;
+                self.config_error = None;
+            }
+            Err(e) => {
+                self.config_error = Some(e);
+                self.config = config::NetworkConfig {
+                    instance_id: inst.id.clone(),
+                    ..Default::default()
+                };
+            }
+        }
+        self.instance_name = inst.name.clone();
+        self.rpc_port_text = inst.rpc_port.to_string();
+        self.auto_start = inst.auto_start;
+        self.remote_manage = inst.remote_manage;
+        self.whitelist_text = inst.whitelist.join(", ");
+        self.console_level = inst.console_log_level.clone().unwrap_or_default();
         self.config_source = inst.config_toml.clone();
     }
 
@@ -375,44 +433,101 @@ impl App {
         self.toast = Some((message.into(), ctx.input(|i| i.time), ok));
     }
 
-    fn validate_config(&self) -> Result<(), String> {
-        if self.config.network_name.trim().is_empty() {
-            return Err("网络名称不能为空".to_owned());
+    fn rpc_port(&self) -> Option<u16> {
+        self.rpc_port_text
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p > 0)
+    }
+
+    fn validate_all(&self) -> Result<(), String> {
+        if let Some(err) = &self.config_error {
+            return Err(format!("TOML 解析失败：{err}"));
         }
-        if self.config.port == 0 {
-            return Err("监听端口必须在 1-65535 之间".to_owned());
+        config::validate(&self.config)?;
+        if self.rpc_port().is_none() {
+            return Err("RPC 端口必须在 1-65535 之间".to_owned());
         }
-        if !self.config.dhcp {
-            let ip = self.config.ipv4.trim();
-            let octets: Vec<&str> = ip.split('.').collect();
-            let valid = octets.len() == 4
-                && octets
-                    .iter()
-                    .all(|o| !o.is_empty() && o.len() <= 3 && o.chars().all(|c| c.is_ascii_digit()));
-            if !valid {
-                return Err("虚拟 IPv4 格式不正确".to_owned());
-            }
+        if self.instance_name.trim().is_empty() {
+            return Err("实例名称不能为空".to_owned());
+        }
+        if self.remote_manage && config::parse_whitelist(&self.whitelist_text).is_empty() {
+            return Err(
+                "开启远程管理必须填写 RPC 白名单（填 EasyTier 虚拟网段，如 10.126.126.0/24）"
+                    .to_owned(),
+            );
         }
         Ok(())
+    }
+
+    fn effective_name(&self) -> String {
+        let name = self.instance_name.trim();
+        if name.is_empty() {
+            self.config.network_name.trim().to_owned()
+        } else {
+            name.to_owned()
+        }
     }
 
     fn build_payload(
         &self,
         inst: &service::Instance,
         toml_text: String,
-        start: bool,
+        desired: &str,
     ) -> serde_json::Value {
         json!({
             "instance_id": inst.id,
-            "name": inst.name,
+            "name": self.effective_name(),
             "config_toml": toml_text,
-            "rpc_port": inst.rpc_port,
-            "auto_start": inst.auto_start,
-            "desired_state": if start { "running" } else { "stopped" },
-            "remote_manage_enabled": inst.remote_manage,
-            "rpc_whitelist_cidrs": inst.whitelist,
-            "console_log_level": inst.console_log_level,
+            "rpc_port": self.rpc_port().unwrap_or(inst.rpc_port),
+            "auto_start": self.auto_start,
+            "desired_state": desired,
+            "remote_manage_enabled": self.remote_manage,
+            "rpc_whitelist_cidrs": config::parse_whitelist(&self.whitelist_text),
+            "console_log_level": if self.console_level.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(self.console_level.clone())
+            },
         })
+    }
+
+    fn serialize_config(&self, inst: &service::Instance) -> Result<String, String> {
+        if self.config_dirty || self.config_source.is_empty() {
+            let mut cfg = self.config.clone();
+            cfg.instance_id = inst.id.clone();
+            Ok(config::encode_toml(&cfg, true))
+        } else {
+            Ok(inst.config_toml.clone())
+        }
+    }
+
+    fn mark_saved(&mut self, toml_text: &str) {
+        self.config_dirty = false;
+        self.config_source = toml_text.to_owned();
+        let Some(id) = self.active.clone() else {
+            return;
+        };
+        let name = self.effective_name();
+        let rpc_port = self.rpc_port().unwrap_or(0);
+        let whitelist = config::parse_whitelist(&self.whitelist_text);
+        let level = if self.console_level.is_empty() {
+            None
+        } else {
+            Some(self.console_level.clone())
+        };
+        if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
+            inst.config_toml = toml_text.to_owned();
+            inst.name = name;
+            if rpc_port > 0 {
+                inst.rpc_port = rpc_port;
+            }
+            inst.auto_start = self.auto_start;
+            inst.remote_manage = self.remote_manage;
+            inst.whitelist = whitelist;
+            inst.console_log_level = level;
+        }
     }
 
     fn toggle_running(&mut self, ctx: &egui::Context) {
@@ -424,34 +539,27 @@ impl App {
             self.toast(ctx, "没有可操作的网络实例", false);
             return;
         };
-        if inst.rpc_port == 0 {
-            self.toast(ctx, "实例 RPC 端口无效", false);
-            return;
-        }
         let start = !inst.running();
         if start {
-            if let Err(e) = self.validate_config() {
+            if let Err(e) = self.validate_all() {
                 self.toast(ctx, format!("请先修正配置：{e}"), false);
                 self.tab = Tab::Config;
                 return;
             }
         }
-        let fields = if self.config_dirty || self.config_source.is_empty() {
-            match service::patch_config(&inst.config_toml, &self.config) {
-                Ok(toml_text) => {
-                    self.config_dirty = false;
-                    self.config_source = toml_text.clone();
-                    toml_text
-                }
-                Err(e) => {
-                    self.toast(ctx, e, false);
-                    return;
-                }
+        let toml_text = match self.serialize_config(&inst) {
+            Ok(text) => text,
+            Err(e) => {
+                self.toast(ctx, e, false);
+                return;
             }
-        } else {
-            inst.config_toml.clone()
         };
-        let payload = self.build_payload(&inst, fields, start);
+        let payload = self.build_payload(
+            &inst,
+            toml_text.clone(),
+            if start { "running" } else { "stopped" },
+        );
+        self.mark_saved(&toml_text);
         self.busy = Some(if start { "启动中…" } else { "停止中…" });
         let _ = self.actions.send(service::Action::SetRunning {
             id: inst.id,
@@ -469,32 +577,291 @@ impl App {
             self.toast(ctx, "没有可保存的实例", false);
             return;
         };
-        if let Err(e) = self.validate_config() {
+        if let Err(e) = self.validate_all() {
             self.toast(ctx, e, false);
             return;
         }
-        let toml_text = match service::patch_config(&inst.config_toml, &self.config) {
+        let toml_text = match self.serialize_config(&inst) {
             Ok(text) => text,
             Err(e) => {
                 self.toast(ctx, e, false);
                 return;
             }
         };
-        let payload = self.build_payload(&inst, toml_text.clone(), inst.running());
+        let desired = if inst.running() { "running" } else { "stopped" };
+        let payload = self.build_payload(&inst, toml_text.clone(), desired);
         self.busy = Some("保存中…");
-        self.config_dirty = false;
-        self.config_source = toml_text;
-        let _ = self.actions.send(service::Action::Save { payload });
+        self.mark_saved(&toml_text);
+        let _ = self.actions.send(service::Action::Sync {
+            payload,
+            label: "保存配置".to_owned(),
+        });
     }
 
     fn reset_config(&mut self, ctx: &egui::Context) {
         let Some(inst) = self.active_instance().cloned() else {
             return;
         };
-        self.config = service::config_fields(&inst.config_toml);
-        self.config_source = inst.config_toml;
+        self.config_source.clear();
         self.config_dirty = false;
+        self.ensure_config();
         self.toast(ctx, "已恢复为服务端保存的配置", true);
+    }
+
+    fn open_new_dialog(&mut self) {
+        self.new_dialog = Some(NewDialog {
+            name: "新网络".to_owned(),
+            secret: String::new(),
+            method: 2,
+            dhcp: true,
+        });
+    }
+
+    fn next_rpc_port(&self) -> Option<u16> {
+        let used: Vec<u16> = self.instances.iter().map(|i| i.rpc_port).collect();
+        for port in 15888u16..16888 {
+            if used.contains(&port) {
+                continue;
+            }
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return Some(port);
+            }
+        }
+        None
+    }
+
+    fn create_instance(&mut self, ctx: &egui::Context) {
+        let Some(dlg) = self.new_dialog.take() else {
+            return;
+        };
+        let name = dlg.name.trim().to_owned();
+        if name.is_empty() {
+            self.toast(ctx, "实例名称不能为空", false);
+            self.new_dialog = Some(dlg);
+            return;
+        }
+        let Some(rpc_port) = self.next_rpc_port() else {
+            self.toast(ctx, "没有可用的 RPC 端口（15888-16887）", false);
+            self.new_dialog = Some(dlg);
+            return;
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut cfg = config::NetworkConfig::default();
+        cfg.instance_id = id.clone();
+        cfg.network_name = name.clone();
+        cfg.network_secret = dlg.secret;
+        cfg.networking_method = dlg.method;
+        cfg.dhcp = dlg.dhcp;
+        cfg.listener_urls = if self.instances.is_empty() {
+            vec![
+                "tcp://0.0.0.0:11010".to_owned(),
+                "udp://0.0.0.0:11010".to_owned(),
+                "wg://0.0.0.0:11011".to_owned(),
+            ]
+        } else {
+            vec![
+                "tcp://0.0.0.0:0".to_owned(),
+                "udp://0.0.0.0:0".to_owned(),
+                "wg://0.0.0.0:0".to_owned(),
+            ]
+        };
+        let toml_text = config::encode_toml(&cfg, true);
+        let payload = json!({
+            "instance_id": id.clone(),
+            "name": name,
+            "config_toml": toml_text,
+            "rpc_port": rpc_port,
+            "auto_start": false,
+            "desired_state": "stopped",
+            "remote_manage_enabled": false,
+            "rpc_whitelist_cidrs": [],
+            "console_log_level": serde_json::Value::Null,
+        });
+        self.busy = Some("新建中…");
+        self.pending_active = Some(id);
+        let _ = self.actions.send(service::Action::Create { payload });
+    }
+
+    fn clone_instance(&mut self, ctx: &egui::Context) {
+        let Some(inst) = self.active_instance().cloned() else {
+            self.toast(ctx, "没有可克隆的网络实例", false);
+            return;
+        };
+        let Some(rpc_port) = self.next_rpc_port() else {
+            self.toast(ctx, "没有可用的 RPC 端口（15888-16887）", false);
+            return;
+        };
+        let mut cfg = match config::decode_toml(&inst.config_toml) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.toast(ctx, format!("克隆失败：{e}"), false);
+                return;
+            }
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        cfg.instance_id = id.clone();
+        cfg.listener_urls = vec![
+            "tcp://0.0.0.0:0".to_owned(),
+            "udp://0.0.0.0:0".to_owned(),
+            "wg://0.0.0.0:0".to_owned(),
+        ];
+        let name = format!("{} 副本", inst.name);
+        let toml_text = config::encode_toml(&cfg, true);
+        let payload = json!({
+            "instance_id": id.clone(),
+            "name": name,
+            "config_toml": toml_text,
+            "rpc_port": rpc_port,
+            "auto_start": false,
+            "desired_state": "stopped",
+            "remote_manage_enabled": false,
+            "rpc_whitelist_cidrs": [],
+            "console_log_level": serde_json::Value::Null,
+        });
+        self.busy = Some("克隆中…");
+        self.pending_active = Some(id);
+        let _ = self.actions.send(service::Action::Create { payload });
+    }
+
+    fn confirm_remove(&mut self) {
+        let Some(inst) = self.active_instance().cloned() else {
+            return;
+        };
+        if self.instances.len() <= 1 {
+            return;
+        }
+        self.confirm_delete = Some((inst.id, inst.name));
+    }
+
+    fn delete_instance(&mut self, _ctx: &egui::Context) {
+        let Some((id, _name)) = self.confirm_delete.take() else {
+            return;
+        };
+        if self.instances.len() <= 1 {
+            return;
+        }
+        self.busy = Some("删除中…");
+        let _ = self.actions.send(service::Action::Remove { id });
+    }
+
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        if self.new_dialog.is_some() {
+            let mut create = false;
+            let mut cancel = false;
+            {
+                let dlg = self.new_dialog.as_mut().expect("checked");
+                egui::Window::new("新建网络实例")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                    .show(ctx, |ui| {
+                        ui.set_width(360.0);
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("实例名称").size(11.5).color(MUTED));
+                        ui.add_sized(
+                            [ui.available_width(), 28.0],
+                            egui::TextEdit::singleline(&mut dlg.name)
+                                .hint_text("例如：home-net"),
+                        );
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("网络密钥（可留空）").size(11.5).color(MUTED));
+                        ui.add_sized(
+                            [ui.available_width(), 28.0],
+                            egui::TextEdit::singleline(&mut dlg.secret)
+                                .password(true)
+                                .hint_text("用于验证节点归属"),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("组网方式").size(11.5).color(MUTED));
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut dlg.method, 2, "独立网络");
+                            ui.selectable_value(&mut dlg.method, 1, "指定节点");
+                        });
+                        if dlg.method == 2 {
+                            ui.label(
+                                RichText::new("本机作为根节点监听，其他节点通过监听地址加入。")
+                                    .size(10.5)
+                                    .color(DIM),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new("创建后可在配置页填写对等节点地址。")
+                                    .size(10.5)
+                                    .color(DIM),
+                            );
+                        }
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if switch(ui, dlg.dhcp) {
+                                dlg.dhcp = !dlg.dhcp;
+                            }
+                            ui.label(
+                                RichText::new("DHCP 自动分配虚拟 IP")
+                                    .size(11.5)
+                                    .color(MUTED),
+                            );
+                        });
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(egui::Button::new(
+                                    RichText::new("创建").color(Color32::WHITE),
+                                ).fill(ACCENT))
+                                .clicked()
+                            {
+                                create = true;
+                            }
+                            if ui.button("取消").clicked() {
+                                cancel = true;
+                            }
+                        });
+                    });
+            }
+            if create {
+                self.create_instance(ctx);
+            } else if cancel {
+                self.new_dialog = None;
+            }
+        }
+
+        if let Some((_id, name)) = self.confirm_delete.clone() {
+            let mut confirmed = false;
+            let mut cancel = false;
+            egui::Window::new("删除网络实例")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.set_width(340.0);
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(format!("确定要删除网络实例「{name}」吗？")).size(12.5));
+                    ui.label(
+                        RichText::new("该实例的本地配置将被移除，若网络正在运行将先自动断开。")
+                            .size(10.5)
+                            .color(DIM),
+                    );
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("删除").color(Color32::WHITE))
+                                    .fill(ERR.gamma_multiply(0.75)),
+                            )
+                            .clicked()
+                        {
+                            confirmed = true;
+                        }
+                        if ui.button("取消").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if confirmed {
+                self.delete_instance(ctx);
+            } else if cancel {
+                self.confirm_delete = None;
+            }
+        }
     }
 
     fn display_ip(&self) -> String {
@@ -505,7 +872,7 @@ impl App {
             }
         }
         if !self.config.dhcp {
-            self.config.ipv4.trim().to_owned()
+            self.config.virtual_ipv4.trim().to_owned()
         } else {
             String::new()
         }
@@ -538,6 +905,12 @@ impl App {
                                 self.set_active(id);
                             } else {
                                 self.active = None;
+                            }
+                        }
+                        if let Some(pending) = self.pending_active.clone() {
+                            if self.instances.iter().any(|i| i.id == pending) {
+                                self.pending_active = None;
+                                self.set_active(pending);
                             }
                         }
                         self.ensure_config();
@@ -590,6 +963,9 @@ impl App {
                     self.busy = None;
                     if !result.ok && result.label == "保存配置" {
                         self.config_dirty = true;
+                    }
+                    if !result.ok && result.label == "新建网络" {
+                        self.pending_active = None;
                     }
                     self.toast(ctx, format!("{}：{}", result.label, result.message), result.ok);
                 }
@@ -697,10 +1073,11 @@ impl App {
 
         let (row, _) = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::hover());
         let bw = (w - 16.0) / 3.0;
-        let actions = [("+ 新建", false), ("克隆", false), ("刷新", true)];
+        let has_active = self.active_instance().is_some();
+        let actions = [("+ 新建", true), ("克隆", has_active), ("刷新", true)];
         for (i, (label, enabled)) in actions.iter().enumerate() {
             let r = Rect::from_min_size(Pos2::new(row.left() + i as f32 * (bw + 8.0), row.top()), Vec2::new(bw, 30.0));
-            let resp = ui.interact(r, egui::Id::new(("sidebar-action", i)), Sense::click());
+            let resp = ui.interact(r, egui::Id::new(("sidebar-action", i)), (if *enabled { Sense::click() } else { Sense::hover() }));
             p.rect_filled(r, CornerRadius::same(8), if resp.hovered() && *enabled { CARD_HI } else { CARD });
             p.rect_stroke(r, CornerRadius::same(8), Stroke::new(1.0, BORDER), StrokeKind::Inside);
             let color = if *enabled { if resp.hovered() { TEXT } else { MUTED } } else { DIM };
@@ -708,9 +1085,11 @@ impl App {
             if resp.hovered() && *enabled {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
-            if resp.clicked() {
-                if i == 0 || i == 1 {
-                    self.toast(&ctx, "新建/克隆将在下一阶段接入", false);
+            if resp.clicked() && *enabled {
+                if i == 0 {
+                    self.open_new_dialog();
+                } else if i == 1 {
+                    self.clone_instance(&ctx);
                 } else {
                     let _ = self.actions.send(service::Action::Refresh);
                     self.toast(&ctx, "已请求刷新", true);
@@ -849,7 +1228,7 @@ impl App {
             if !self.service_running && self.service_error.is_none() {
                 self.empty_state(ui, &p, "正在读取后台服务", "首次连接服务需要一到两秒", None);
             } else {
-                self.empty_state(ui, &p, "没有可用的网络实例", "创建与管理实例将在下一阶段接入", None);
+                self.empty_state(ui, &p, "没有可用的网络实例", "点击左下角「+ 新建」创建第一个网络", None);
             }
             return;
         }
@@ -1159,136 +1538,526 @@ impl App {
     }
 
     fn config_tab(&mut self, ui: &mut egui::Ui) {
-        let w = ui.available_width();
-        let p = ui.painter().clone();
-        let ctx = ui.ctx().clone();
-
         let Some(inst) = self.active_instance().cloned() else {
+            let p = ui.painter().clone();
             self.empty_state(ui, &p, "未选择网络", "选择左侧网络后编辑配置", None);
             return;
         };
         if inst.config_toml.is_empty() {
-            self.empty_state(ui, &p, "配置不可用", "服务端没有返回该实例的配置内容", None);
+            let p = ui.painter().clone();
+            self.empty_state(
+                ui,
+                &p,
+                "配置不可用",
+                "服务端没有返回该实例的配置内容",
+                None,
+            );
             return;
         }
 
-        let (r, _) = ui.allocate_exact_size(Vec2::new(w, 430.0), Sense::hover());
-        card(&p, r);
-        txt(&p, Pos2::new(r.left() + 20.0, r.top() + 18.0), Align2::LEFT_TOP, "基础配置", 14.0, TEXT);
-        let subtitle = if self.config_dirty {
-            "有未保存的修改，点击「保存配置」写入服务"
-        } else {
-            "修改后点击「保存配置」；运行中修改需要重启网络生效"
-        };
-        txt(&p, Pos2::new(r.left() + 20.0, r.top() + 38.0), Align2::LEFT_TOP, subtitle, 11.0, if self.config_dirty { WARN } else { DIM });
-
-        let label_x = r.left() + 20.0;
-        let field_x = r.left() + 150.0;
-        let field_w = 300.0;
-        let row_h = 48.0;
-        let mut y = r.top() + 76.0;
+        let ctx = ui.ctx().clone();
+        let mut cfg = self.config.clone();
+        let mut instance_name = self.instance_name.clone();
+        let mut rpc_text = self.rpc_port_text.clone();
+        let mut auto_start = self.auto_start;
+        let mut remote = self.remote_manage;
+        let mut whitelist = self.whitelist_text.clone();
+        let mut level = self.console_level.clone();
+        let mut show_advanced = self.show_advanced;
+        let mut secret_visible = self.secret_visible;
         let mut changed = false;
 
-        txt(&p, Pos2::new(label_x, y + 16.0), Align2::LEFT_CENTER, "网络名称", 12.0, MUTED);
-        changed |= ui
-            .put(Rect::from_min_size(Pos2::new(field_x, y), Vec2::new(field_w, 32.0)), egui::TextEdit::singleline(&mut self.config.network_name).hint_text("例如：home-net"))
-            .changed();
-        y += row_h;
+        if let Some(err) = self.config_error.clone() {
+            card_frame().show(ui, |ui| {
+                ui.label(RichText::new("配置解析失败").size(13.0).color(ERR));
+                ui.label(RichText::new(err).size(11.0).color(MUTED));
+                ui.label(
+                    RichText::new("可点击「重置」重新读取服务端保存的配置。")
+                        .size(10.5)
+                        .color(DIM),
+                );
+            });
+            ui.add_space(8.0);
+        }
 
-        txt(&p, Pos2::new(label_x, y + 16.0), Align2::LEFT_CENTER, "网络密钥", 12.0, MUTED);
-        changed |= ui
-            .put(Rect::from_min_size(Pos2::new(field_x, y), Vec2::new(field_w, 32.0)), egui::TextEdit::singleline(&mut self.config.network_secret).password(true))
-            .changed();
-        y += row_h;
+        card_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("实例配置").size(14.0).color(TEXT));
+                ui.add_space(8.0);
+                if self.config_dirty {
+                    ui.label(RichText::new("有未保存的修改").size(10.5).color(WARN));
+                } else {
+                    ui.label(
+                        RichText::new("修改后点击「保存配置」；运行中修改需要重启网络生效")
+                            .size(10.5)
+                            .color(DIM),
+                    );
+                }
+            });
+            ui.add_space(10.0);
 
-        txt(&p, Pos2::new(label_x, y + 16.0), Align2::LEFT_CENTER, "虚拟 IPv4", 12.0, MUTED);
-        let ip_resp = ui.put(
-            Rect::from_min_size(Pos2::new(field_x, y), Vec2::new(field_w, 32.0)),
-            egui::TextEdit::singleline(&mut self.config.ipv4)
-                .hint_text(if self.config.dhcp { "由 DHCP 自动分配" } else { "10.126.126.1" })
-                .interactive(!self.config.dhcp),
-        );
-        changed |= ip_resp.changed();
-        y += row_h;
+            changed |= text_row(ui, "实例名称", &mut instance_name, "用于区分多个网络实例");
+            changed |= text_row(ui, "网络名称", &mut cfg.network_name, "同一网络名称 + 密钥才能互联");
 
-        txt(&p, Pos2::new(label_x, y + 16.0), Align2::LEFT_CENTER, "监听端口", 12.0, MUTED);
-        let mut port_text = if self.config.port == 0 {
-            String::new()
-        } else {
-            self.config.port.to_string()
-        };
-        if ui
-            .put(
-                Rect::from_min_size(Pos2::new(field_x, y), Vec2::new(field_w, 32.0)),
-                egui::TextEdit::singleline(&mut port_text).hint_text("11010"),
-            )
-            .changed()
-        {
-            if let Ok(port) = port_text.trim().parse::<u16>() {
-                if port != self.config.port {
-                    self.config.port = port;
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [96.0, 26.0],
+                    egui::Label::new(RichText::new("网络密钥").size(11.5).color(MUTED)),
+                );
+                let w = (ui.available_width() - 60.0).max(120.0);
+                let resp = ui.add_sized(
+                    [w, 26.0],
+                    egui::TextEdit::singleline(&mut cfg.network_secret)
+                        .password(!secret_visible)
+                        .hint_text("用于验证节点归属"),
+                );
+                changed |= resp.changed();
+                if ui
+                    .small_button(if secret_visible { "隐藏" } else { "显示" })
+                    .clicked()
+                {
+                    secret_visible = !secret_visible;
+                }
+            });
+            changed |= text_row(ui, "主机名", &mut cfg.hostname, "本机在虚拟网中的名称");
+
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [96.0, 26.0],
+                    egui::Label::new(RichText::new("组网方式").size(11.5).color(MUTED)),
+                );
+                if ui
+                    .selectable_label(cfg.networking_method == 2, "独立网络")
+                    .clicked()
+                {
+                    cfg.networking_method = 2;
                     changed = true;
                 }
-            } else if port_text.trim().is_empty() {
-                if self.config.port != 0 {
-                    self.config.port = 0;
+                if ui
+                    .selectable_label(cfg.networking_method != 2, "指定节点")
+                    .clicked()
+                {
+                    cfg.networking_method = 1;
                     changed = true;
                 }
+            });
+            if cfg.networking_method == 2 {
+                ui.label(
+                    RichText::new("独立网络：本机仅作为根/监听节点，其他节点通过监听地址加入。")
+                        .size(10.5)
+                        .color(DIM),
+                );
+            } else {
+                ui.label(
+                    RichText::new("对等节点 / 公共服务器（Peer URL）")
+                        .size(11.0)
+                        .color(MUTED),
+                );
+                changed |= string_list(ui, &mut cfg.peer_urls, "tcp://192.168.1.10:11010");
             }
-        }
-        y += row_h;
 
-        txt(&p, Pos2::new(label_x, y + 11.0), Align2::LEFT_CENTER, "DHCP", 12.0, MUTED);
-        let sw = Rect::from_min_size(Pos2::new(field_x, y + 1.0), Vec2::new(40.0, 22.0));
-        let resp = ui.interact(sw, egui::Id::new("dhcp-switch"), Sense::click());
-        if resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        if resp.clicked() {
-            self.config.dhcp = !self.config.dhcp;
-            changed = true;
-        }
-        p.rect_filled(sw, CornerRadius::same(11), if self.config.dhcp { OK.gamma_multiply(0.85) } else { CARD_HI });
-        let knob_x = if self.config.dhcp { sw.right() - 11.0 } else { sw.left() + 11.0 };
-        p.circle_filled(Pos2::new(knob_x, sw.center().y), 8.0, Color32::WHITE);
-        txt(&p, Pos2::new(sw.right() + 10.0, sw.center().y), Align2::LEFT_CENTER, if self.config.dhcp { "已启用 · 自动分配地址" } else { "已关闭 · 使用固定地址" }, 11.5, MUTED);
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [96.0, 26.0],
+                    egui::Label::new(RichText::new("虚拟 IPv4").size(11.5).color(MUTED)),
+                );
+                let w = (ui.available_width() - 150.0).max(110.0);
+                let resp = ui.add_sized(
+                    [w, 26.0],
+                    egui::TextEdit::singleline(&mut cfg.virtual_ipv4)
+                        .interactive(!cfg.dhcp)
+                        .hint_text(if cfg.dhcp { "由 DHCP 自动分配" } else { "10.126.126.1" }),
+                );
+                changed |= resp.changed();
+                ui.label(RichText::new("/").size(12.0).color(MUTED));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut cfg.network_length)
+                            .range(1..=32)
+                            .speed(1.0),
+                    )
+                    .changed();
+                if switch(ui, cfg.dhcp) {
+                    cfg.dhcp = !cfg.dhcp;
+                    changed = true;
+                }
+                ui.label(RichText::new("DHCP").size(11.5).color(MUTED));
+            });
 
+            ui.add_space(10.0);
+            ui.label(RichText::new("实例与运行").size(12.0).color(TEXT));
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [96.0, 26.0],
+                    egui::Label::new(RichText::new("RPC 端口").size(11.5).color(MUTED)),
+                );
+                let resp = ui.add_sized(
+                    [90.0, 26.0],
+                    egui::TextEdit::singleline(&mut rpc_text).hint_text("15888"),
+                );
+                changed |= resp.changed();
+                ui.label(RichText::new("每个实例独立，重启后生效").size(10.5).color(DIM));
+            });
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [96.0, 26.0],
+                    egui::Label::new(RichText::new("开机自启").size(11.5).color(MUTED)),
+                );
+                if switch(ui, auto_start) {
+                    auto_start = !auto_start;
+                    changed = true;
+                }
+                ui.label(
+                    RichText::new("服务运行后自动连接本网络（需后台服务）")
+                        .size(10.5)
+                        .color(DIM),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [96.0, 26.0],
+                    egui::Label::new(RichText::new("远程管理").size(11.5).color(MUTED)),
+                );
+                if switch(ui, remote) {
+                    remote = !remote;
+                    changed = true;
+                }
+                ui.label(
+                    RichText::new("允许虚拟网内其它设备修改本实例（需填写白名单）")
+                        .size(10.5)
+                        .color(DIM),
+                );
+            });
+            if remote {
+                changed |= text_row(
+                    ui,
+                    "RPC 白名单",
+                    &mut whitelist,
+                    "EasyTier 虚拟网段，如 10.126.126.0/24（逗号分隔）",
+                );
+            }
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [96.0, 26.0],
+                    egui::Label::new(RichText::new("内核日志").size(11.5).color(MUTED)),
+                );
+                let levels = [
+                    ("默认", ""),
+                    ("off", "off"),
+                    ("error", "error"),
+                    ("warn", "warn"),
+                    ("info", "info"),
+                    ("debug", "debug"),
+                    ("trace", "trace"),
+                ];
+                for (label, value) in levels.iter() {
+                    if ui.selectable_label(level == *value, *label).clicked() {
+                        level = (*value).to_owned();
+                        changed = true;
+                    }
+                }
+            });
+            ui.label(
+                RichText::new("内核日志级别是启动参数，运行中修改需要重启网络。")
+                    .size(10.5)
+                    .color(DIM),
+            );
+        });
+
+        ui.add_space(8.0);
+        if ui
+            .button(if show_advanced {
+                "▾ 收起高级设置"
+            } else {
+                "▸ 展开高级设置"
+            })
+            .clicked()
+        {
+            show_advanced = !show_advanced;
+        }
+
+        if show_advanced {
+            ui.add_space(8.0);
+            card_frame().show(ui, |ui| {
+                ui.label(RichText::new("监听与转发").size(14.0).color(TEXT));
+                ui.label(
+                    RichText::new("监听器。多实例并存时使用 0 端口由系统自动分配。")
+                        .size(10.5)
+                        .color(DIM),
+                );
+                ui.add_space(4.0);
+                changed |= string_list(ui, &mut cfg.listener_urls, "tcp://0.0.0.0:11010");
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("映射监听器（公网地址/NAT 场景，可留空）")
+                        .size(11.0)
+                        .color(MUTED),
+                );
+                changed |= string_list(ui, &mut cfg.mapped_listeners, "tcp://1.2.3.4:11223");
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    changed |= opt_toggle_row(ui, "SOCKS5 服务器", &mut cfg.enable_socks5);
+                    if cfg.enable_socks5 == Some(true) {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut cfg.socks5_port)
+                                    .range(1..=65535)
+                                    .speed(1.0),
+                            )
+                            .changed();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if bool_toggle_row(ui, "VPN 门户（WireGuard）", &mut cfg.enable_vpn_portal) {
+                        changed = true;
+                    }
+                    if cfg.enable_vpn_portal {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut cfg.vpn_portal_listen_port)
+                                    .range(1..=65535)
+                                    .speed(1.0),
+                            )
+                            .changed();
+                    }
+                });
+                if cfg.enable_vpn_portal {
+                    changed |= text_row(
+                        ui,
+                        "客户端网段",
+                        &mut cfg.vpn_portal_client_network_addr,
+                        "10.14.14.0",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            [96.0, 26.0],
+                            egui::Label::new(
+                                RichText::new("网段前缀").size(11.5).color(MUTED),
+                            ),
+                        );
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut cfg.vpn_portal_client_network_len)
+                                    .range(1..=32)
+                                    .speed(1.0),
+                            )
+                            .changed();
+                    });
+                }
+
+                ui.add_space(8.0);
+                ui.label(RichText::new("端口转发").size(11.0).color(MUTED));
+                changed |= port_forwards_editor(ui, &mut cfg.port_forwards);
+            });
+
+            ui.add_space(8.0);
+            card_frame().show(ui, |ui| {
+                ui.label(RichText::new("路由与子网").size(14.0).color(TEXT));
+                ui.label(
+                    RichText::new("子网代理（把本机可达的网段共享给虚拟网络）")
+                        .size(11.0)
+                        .color(MUTED),
+                );
+                changed |= string_list(ui, &mut cfg.proxy_cidrs, "10.0.0.0/24");
+                ui.add_space(6.0);
+                if bool_toggle_row(ui, "手动路由", &mut cfg.enable_manual_routes) {
+                    changed = true;
+                }
+                if cfg.enable_manual_routes {
+                    changed |= string_list(ui, &mut cfg.routes, "192.168.0.0/16");
+                }
+                ui.label(RichText::new("出口节点").size(11.0).color(MUTED));
+                changed |= string_list(ui, &mut cfg.exit_nodes, "10.144.144.1");
+                changed |= opt_toggle_row(ui, "启用出口节点", &mut cfg.enable_exit_node);
+                changed |= opt_toggle_row(
+                    ui,
+                    "中继白名单",
+                    &mut cfg.enable_relay_network_whitelist,
+                );
+                if cfg.enable_relay_network_whitelist == Some(true) {
+                    changed |= string_list(ui, &mut cfg.relay_network_whitelist, "net1");
+                }
+            });
+
+            ui.add_space(8.0);
+            card_frame().show(ui, |ui| {
+                ui.label(RichText::new("协议与性能").size(14.0).color(TEXT));
+                ui.add_space(4.0);
+                ui.columns(2, |cols| {
+                    changed |= bool_toggle_row(&mut cols[0], "延迟优先", &mut cfg.latency_first);
+                    changed |= opt_toggle_row(&mut cols[1], "多线程", &mut cfg.multi_thread);
+                    changed |= opt_toggle_row(&mut cols[0], "禁用 P2P", &mut cfg.disable_p2p);
+                    changed |= opt_toggle_row(&mut cols[1], "仅 P2P", &mut cfg.p2p_only);
+                    changed |= opt_toggle_row(&mut cols[0], "懒建立 P2P", &mut cfg.lazy_p2p);
+                    changed |= opt_toggle_row(&mut cols[1], "需要 P2P", &mut cfg.need_p2p);
+                    changed |= opt_toggle_row(
+                        &mut cols[0],
+                        "禁用 TCP 打洞",
+                        &mut cfg.disable_tcp_hole_punching,
+                    );
+                    changed |= opt_toggle_row(
+                        &mut cols[1],
+                        "禁用 UDP 打洞",
+                        &mut cfg.disable_udp_hole_punching,
+                    );
+                    changed |= opt_toggle_row(
+                        &mut cols[0],
+                        "禁用对称 NAT 打洞",
+                        &mut cfg.disable_sym_hole_punching,
+                    );
+                    changed |= opt_toggle_row(&mut cols[1], "禁用 UPnP", &mut cfg.disable_upnp);
+                    changed |= opt_toggle_row(&mut cols[0], "KCP 代理", &mut cfg.enable_kcp_proxy);
+                    changed |= opt_toggle_row(
+                        &mut cols[1],
+                        "禁用 KCP 入站",
+                        &mut cfg.disable_kcp_input,
+                    );
+                    changed |= opt_toggle_row(&mut cols[0], "QUIC 代理", &mut cfg.enable_quic_proxy);
+                    changed |= opt_toggle_row(
+                        &mut cols[1],
+                        "禁用 QUIC 入站",
+                        &mut cfg.disable_quic_input,
+                    );
+                    changed |= opt_toggle_row(&mut cols[0], "使用 smoltcp", &mut cfg.use_smoltcp);
+                    changed |= opt_toggle_row(&mut cols[1], "无 TUN 模式", &mut cfg.no_tun);
+                    changed |= opt_toggle_row(&mut cols[0], "绑定物理设备", &mut cfg.bind_device);
+                    changed |= opt_toggle_row(
+                        &mut cols[1],
+                        "系统转发",
+                        &mut cfg.proxy_forward_by_system,
+                    );
+                    changed |= opt_toggle_row(&mut cols[0], "禁用加密", &mut cfg.disable_encryption);
+                    changed |= opt_toggle_row(&mut cols[1], "禁用 IPv6", &mut cfg.disable_ipv6);
+                    changed |= opt_toggle_row(&mut cols[0], "私有模式", &mut cfg.enable_private_mode);
+                    changed |= opt_toggle_row(
+                        &mut cols[1],
+                        "转发全部 Peer RPC",
+                        &mut cfg.relay_all_peer_rpc,
+                    );
+                    changed |= opt_toggle_row(
+                        &mut cols[0],
+                        "UDP 广播中继",
+                        &mut cfg.enable_udp_broadcast_relay,
+                    );
+                    changed |= opt_toggle_row(&mut cols[1], "Magic DNS", &mut cfg.enable_magic_dns);
+                });
+                ui.label(
+                    RichText::new("UDP 广播中继仅 Windows；Magic DNS 会修改系统 DNS")
+                        .size(10.5)
+                        .color(DIM),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [96.0, 26.0],
+                        egui::Label::new(RichText::new("MTU").size(11.5).color(MUTED)),
+                    );
+                    let mut mtu = cfg.mtu.unwrap_or(0);
+                    if ui
+                        .add(egui::DragValue::new(&mut mtu).range(0..=9000).speed(1.0))
+                        .changed()
+                    {
+                        cfg.mtu = if mtu == 0 { None } else { Some(mtu) };
+                        changed = true;
+                    }
+                    ui.label(RichText::new("0 = 内核默认").size(10.5).color(DIM));
+                });
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [96.0, 26.0],
+                        egui::Label::new(
+                            RichText::new("入站限速 B/s").size(11.5).color(MUTED),
+                        ),
+                    );
+                    let mut limit = cfg.instance_recv_bps_limit.unwrap_or(0);
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut limit)
+                                .range(0..=1_000_000_000u64)
+                                .speed(1024.0),
+                        )
+                        .changed()
+                    {
+                        cfg.instance_recv_bps_limit = if limit == 0 { None } else { Some(limit) };
+                        changed = true;
+                    }
+                    ui.label(RichText::new("0 = 不限速").size(10.5).color(DIM));
+                });
+                changed |= text_row(ui, "TUN 接口名", &mut cfg.dev_name, "留空自动生成");
+                changed |= text_row(ui, "凭据文件", &mut cfg.credential_file, "留空使用默认");
+            });
+        }
+
+        ui.add_space(10.0);
+        let mut save_clicked = false;
+        let mut reset_clicked = false;
+        let mut clone_clicked = false;
+        let mut delete_clicked = false;
+        let mut copy_clicked = false;
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::Button::new(RichText::new("保存配置").color(Color32::WHITE)).fill(ACCENT))
+                .clicked()
+            {
+                save_clicked = true;
+            }
+            if ui.button("重置").clicked() {
+                reset_clicked = true;
+            }
+            if ui.button("复制 TOML").clicked() {
+                copy_clicked = true;
+            }
+            if ui.button("克隆实例").clicked() {
+                clone_clicked = true;
+            }
+            if ui
+                .add(egui::Button::new(RichText::new("删除实例").color(ERR)))
+                .clicked()
+            {
+                delete_clicked = true;
+            }
+            if let Some(busy) = self.busy {
+                ui.label(RichText::new(busy).size(11.0).color(MUTED));
+            }
+        });
+        ui.add_space(20.0);
+
+        self.config = cfg;
+        self.instance_name = instance_name;
+        self.rpc_port_text = rpc_text;
+        self.auto_start = auto_start;
+        self.remote_manage = remote;
+        self.whitelist_text = whitelist;
+        self.console_level = level;
+        self.show_advanced = show_advanced;
+        self.secret_visible = secret_visible;
         if changed {
             self.config_dirty = true;
         }
-
-        let btn_y = r.bottom() - 56.0;
-        let save = Rect::from_min_size(Pos2::new(field_x, btn_y), Vec2::new(96.0, 32.0));
-        let save_resp = ui.put(save, egui::Button::new(RichText::new("保存配置").color(Color32::WHITE)).fill(ACCENT));
-        if save_resp.clicked() {
+        if copy_clicked {
+            let mut copy = self.config.clone();
+            copy.instance_id = inst.id.clone();
+            ctx.copy_text(config::encode_toml(&copy, true));
+            self.toast(&ctx, "TOML 已复制到剪贴板", true);
+        }
+        if save_clicked {
             self.save_config(&ctx);
         }
-        let reset = Rect::from_min_size(Pos2::new(field_x + 108.0, btn_y), Vec2::new(80.0, 32.0));
-        if ui.put(reset, egui::Button::new("重置")).clicked() {
+        if reset_clicked {
             self.reset_config(&ctx);
         }
-        if let Some(busy) = self.busy {
-            txt(&p, Pos2::new(field_x + 200.0, btn_y + 16.0), Align2::LEFT_CENTER, busy, 11.0, MUTED);
+        if clone_clicked {
+            self.clone_instance(&ctx);
         }
-
-        let side = Rect::from_min_size(Pos2::new(r.right() - 250.0, r.top() + 76.0), Vec2::new(230.0, 264.0));
-        p.rect_filled(side, CornerRadius::same(8), INPUT);
-        p.rect_stroke(side, CornerRadius::same(8), Stroke::new(1.0, BORDER), StrokeKind::Inside);
-        txt(&p, Pos2::new(side.left() + 14.0, side.top() + 14.0), Align2::LEFT_TOP, "配置摘要", 12.0, TEXT);
-        let rows: [(&str, String); 7] = [
-            ("实例 ID", truncate(&inst.id, 12)),
-            ("RPC 端口", inst.rpc_port.to_string()),
-            ("当前状态", inst.status_label().to_owned()),
-            ("开机自启", if inst.auto_start { "已开启" } else { "关闭" }.to_owned()),
-            ("远程管理", if inst.remote_manage { "已开启" } else { "关闭" }.to_owned()),
-            ("IPv4 分配", if self.config.dhcp { "DHCP" } else { "固定地址" }.to_owned()),
-            ("监听端口", self.config.port.to_string()),
-        ];
-        let mut ry = side.top() + 42.0;
-        for (k, v) in rows.iter() {
-            txt(&p, Pos2::new(side.left() + 14.0, ry), Align2::LEFT_TOP, *k, 11.0, DIM);
-            txt(&p, Pos2::new(side.right() - 14.0, ry), Align2::RIGHT_TOP, v, 11.0, MUTED);
-            ry += 28.0;
+        if delete_clicked {
+            if self.instances.len() <= 1 {
+                self.toast(&ctx, "至少保留一个网络实例", false);
+            } else {
+                self.confirm_remove();
+            }
         }
     }
 
@@ -1355,6 +2124,142 @@ impl App {
             txt(&p, Pos2::new(r.left() + 18.0, r.top() + 64.0), Align2::LEFT_TOP, message, 11.0, DIM);
         }
     }
+}
+
+fn switch(ui: &mut egui::Ui, on: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(40.0, 22.0), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let p = ui.painter();
+    p.rect_filled(
+        rect,
+        CornerRadius::same(11),
+        if on { OK.gamma_multiply(0.85) } else { CARD_HI },
+    );
+    let knob_x = if on {
+        rect.right() - 11.0
+    } else {
+        rect.left() + 11.0
+    };
+    p.circle_filled(Pos2::new(knob_x, rect.center().y), 8.0, Color32::WHITE);
+    resp.clicked()
+}
+
+fn text_row(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [96.0, 26.0],
+            egui::Label::new(RichText::new(label).size(11.5).color(MUTED)),
+        );
+        let w = ui.available_width().max(120.0);
+        changed = ui
+            .add_sized([w, 26.0], egui::TextEdit::singleline(value).hint_text(hint))
+            .changed();
+    });
+    changed
+}
+
+fn bool_toggle_row(ui: &mut egui::Ui, label: &str, value: &mut bool) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if switch(ui, *value) {
+            *value = !*value;
+            changed = true;
+        }
+        ui.label(RichText::new(label).size(11.5).color(MUTED));
+    });
+    changed
+}
+
+fn opt_toggle_row(ui: &mut egui::Ui, label: &str, value: &mut Option<bool>) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if switch(ui, *value == Some(true)) {
+            *value = Some(*value != Some(true));
+            changed = true;
+        }
+        ui.label(RichText::new(label).size(11.5).color(MUTED));
+    });
+    changed
+}
+
+fn string_list(ui: &mut egui::Ui, values: &mut Vec<String>, placeholder: &str) -> bool {
+    let mut changed = false;
+    let mut remove = None;
+    for (i, value) in values.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            let w = (ui.available_width() - 32.0).max(100.0);
+            changed |= ui
+                .add_sized([w, 26.0], egui::TextEdit::singleline(value).hint_text(placeholder))
+                .changed();
+            if ui.small_button("−").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        values.remove(i);
+        changed = true;
+    }
+    if ui.small_button("+ 添加").clicked() {
+        values.push(String::new());
+        changed = true;
+    }
+    changed
+}
+
+fn port_forwards_editor(ui: &mut egui::Ui, forwards: &mut Vec<config::PortForward>) -> bool {
+    let mut changed = false;
+    let mut remove = None;
+    for (i, fwd) in forwards.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add_sized(
+                    [56.0, 26.0],
+                    egui::TextEdit::singleline(&mut fwd.proto).hint_text("tcp"),
+                )
+                .changed();
+            changed |= ui
+                .add_sized(
+                    [120.0, 26.0],
+                    egui::TextEdit::singleline(&mut fwd.bind_ip).hint_text("0.0.0.0"),
+                )
+                .changed();
+            changed |= ui
+                .add_sized(
+                    [64.0, 26.0],
+                    egui::DragValue::new(&mut fwd.bind_port).range(1..=65535),
+                )
+                .changed();
+            ui.label(RichText::new("→").size(12.0).color(MUTED));
+            changed |= ui
+                .add_sized(
+                    [120.0, 26.0],
+                    egui::TextEdit::singleline(&mut fwd.dst_ip).hint_text("10.126.126.1"),
+                )
+                .changed();
+            changed |= ui
+                .add_sized(
+                    [64.0, 26.0],
+                    egui::DragValue::new(&mut fwd.dst_port).range(1..=65535),
+                )
+                .changed();
+            if ui.small_button("−").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        forwards.remove(i);
+        changed = true;
+    }
+    if ui.small_button("+ 添加转发").clicked() {
+        forwards.push(config::PortForward::default());
+        changed = true;
+    }
+    changed
 }
 
 fn lat_color(ms: u32) -> Color32 {
@@ -1477,6 +2382,9 @@ impl eframe::App for App {
                     ui.add_space(24.0);
                 });
         });
+
+        let ctx = ui.ctx().clone();
+        self.dialogs(&ctx);
 
         if let Some((message, at, ok)) = self.toast.clone() {
             let now = ui.input(|i| i.time);

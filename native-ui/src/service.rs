@@ -110,8 +110,15 @@ pub enum Action {
         start: bool,
         payload: Option<Value>,
     },
-    Save {
+    Sync {
         payload: Value,
+        label: String,
+    },
+    Create {
+        payload: Value,
+    },
+    Remove {
+        id: String,
     },
 }
 
@@ -283,23 +290,75 @@ fn apply_action(st: &mut LoopState, action: Action, event_tx: &Sender<Event>) ->
         Action::SetRunning { id, start, payload } => {
             handle_set_running(event_tx, st, &id, start, payload)
         }
-        Action::Save { payload } => match pipe_request("sync_instance", &payload) {
-            Ok(_) => {
-                st.last_service = None;
-                let _ = event_tx.send(Event::Action(ActionResult {
-                    label: "保存配置".to_owned(),
-                    ok: true,
-                    message: "配置已保存".to_owned(),
-                }));
-            }
-            Err(e) => {
-                let _ = event_tx.send(Event::Action(ActionResult {
-                    label: "保存配置".to_owned(),
+        Action::Sync { payload, label } => {
+            let result = match pipe_request("sync_instance", &payload) {
+                Ok(_) => {
+                    st.last_service = None;
+                    ActionResult {
+                        label,
+                        ok: true,
+                        message: "配置已保存".to_owned(),
+                    }
+                }
+                Err(e) => ActionResult {
+                    label,
                     ok: false,
                     message: e,
-                }));
-            }
-        },
+                },
+            };
+            let _ = event_tx.send(Event::Action(result));
+        }
+        Action::Create { payload } => {
+            let id = payload
+                .get("instance_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let result = match pipe_request("sync_instance", &payload) {
+                Ok(_) => {
+                    st.last_service = None;
+                    if !id.is_empty() {
+                        st.active = Some(id);
+                        st.reset();
+                    }
+                    ActionResult {
+                        label: "新建网络".to_owned(),
+                        ok: true,
+                        message: "已创建并写入后台服务".to_owned(),
+                    }
+                }
+                Err(e) => ActionResult {
+                    label: "新建网络".to_owned(),
+                    ok: false,
+                    message: e,
+                },
+            };
+            let _ = event_tx.send(Event::Action(result));
+        }
+        Action::Remove { id } => {
+            // The service refuses to delete a running instance, so stop first
+            // and ignore "not running" errors.
+            let _ = pipe_request("stop_instance", &json!({ "instance_id": id }));
+            let result = match pipe_request("remove_instance", &json!({ "instance_id": id })) {
+                Ok(_) => {
+                    st.last_service = None;
+                    if st.active.as_deref() == Some(id.as_str()) {
+                        st.active = None;
+                    }
+                    ActionResult {
+                        label: "删除网络".to_owned(),
+                        ok: true,
+                        message: "实例已删除".to_owned(),
+                    }
+                }
+                Err(e) => ActionResult {
+                    label: "删除网络".to_owned(),
+                    ok: false,
+                    message: e,
+                },
+            };
+            let _ = event_tx.send(Event::Action(result));
+        }
     }
     true
 }
@@ -681,165 +740,6 @@ fn parse_node(value: &Value) -> Option<NodeInfo> {
             _ => String::new(),
         },
     })
-}
-
-#[derive(Clone, Debug)]
-pub struct ConfigFields {
-    pub network_name: String,
-    pub network_secret: String,
-    pub ipv4: String,
-    pub port: u16,
-    pub dhcp: bool,
-}
-
-impl Default for ConfigFields {
-    fn default() -> Self {
-        Self {
-            network_name: String::new(),
-            network_secret: String::new(),
-            ipv4: String::new(),
-            port: 0,
-            dhcp: true,
-        }
-    }
-}
-
-pub fn config_fields(toml_text: &str) -> ConfigFields {
-    let mut fields = ConfigFields {
-        dhcp: true,
-        ..Default::default()
-    };
-    let Ok(document) = parse_toml(toml_text) else {
-        return fields;
-    };
-    fields.dhcp = document
-        .get("dhcp")
-        .and_then(toml::Value::as_bool)
-        .unwrap_or(true);
-    fields.ipv4 = document
-        .get("ipv4")
-        .and_then(toml::Value::as_str)
-        .unwrap_or("")
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .to_owned();
-    if !fields.ipv4.is_empty() {
-        fields.dhcp = false;
-    }
-    if let Some(identity) = document.get("network_identity").and_then(toml::Value::as_table) {
-        fields.network_name = identity
-            .get("network_name")
-            .and_then(toml::Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        fields.network_secret = identity
-            .get("network_secret")
-            .and_then(toml::Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-    }
-    fields.port = document
-        .get("listeners")
-        .and_then(toml::Value::as_array)
-        .and_then(|list| {
-            list.iter()
-                .filter_map(toml::Value::as_str)
-                .find_map(listener_port)
-        })
-        .unwrap_or(0);
-    fields
-}
-
-fn parse_toml(text: &str) -> Result<toml::Table, String> {
-    text.parse::<toml::Table>()
-        .map_err(|e| format!("配置解析失败：{e}"))
-}
-
-fn listener_port(listener: &str) -> Option<u16> {
-    listener.rsplit_once(':')?.1.parse().ok()
-}
-
-pub fn patch_config(toml_text: &str, fields: &ConfigFields) -> Result<String, String> {
-    let mut document = parse_toml(toml_text)?;
-    if fields.dhcp {
-        document.remove("ipv4");
-    } else if !fields.ipv4.trim().is_empty() {
-        let prefix = document
-            .get("ipv4")
-            .and_then(toml::Value::as_str)
-            .and_then(|s| s.split_once('/'))
-            .and_then(|(_, p)| p.trim().parse::<u8>().ok())
-            .unwrap_or(24);
-        document.insert(
-            "ipv4".to_owned(),
-            toml::Value::String(format!("{}/{}", fields.ipv4.trim(), prefix)),
-        );
-    }
-    document.insert("dhcp".to_owned(), toml::Value::Boolean(fields.dhcp));
-    if !document.contains_key("network_identity") {
-        document.insert(
-            "network_identity".to_owned(),
-            toml::Value::Table(toml::Table::new()),
-        );
-    }
-    let identity = document
-        .get_mut("network_identity")
-        .and_then(toml::Value::as_table_mut)
-        .ok_or_else(|| "network_identity 配置格式不正确".to_owned())?;
-    identity.insert(
-        "network_name".to_owned(),
-        toml::Value::String(fields.network_name.trim().to_owned()),
-    );
-    identity.insert(
-        "network_secret".to_owned(),
-        toml::Value::String(fields.network_secret.clone()),
-    );
-    if fields.port > 0 {
-        let old_port = document
-            .get("listeners")
-            .and_then(toml::Value::as_array)
-            .and_then(|list| {
-                list.iter()
-                    .filter_map(toml::Value::as_str)
-                    .find_map(listener_port)
-            });
-        let mut listeners = document
-            .get("listeners")
-            .and_then(toml::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        if listeners.is_empty() {
-            let port = fields.port;
-            listeners = vec![
-                toml::Value::String(format!("tcp://0.0.0.0:{port}")),
-                toml::Value::String(format!("udp://0.0.0.0:{port}")),
-                toml::Value::String(format!("wg://0.0.0.0:{}", port.saturating_add(1))),
-            ];
-        } else if old_port != Some(fields.port) {
-            let old = old_port.unwrap_or(fields.port);
-            for listener in listeners.iter_mut() {
-                let toml::Value::String(text) = listener else {
-                    continue;
-                };
-                let Some(port) = listener_port(text.as_str()) else {
-                    continue;
-                };
-                let target = if port == old {
-                    Some(fields.port)
-                } else if text.starts_with("wg://") && port == old.saturating_add(1) {
-                    Some(fields.port.saturating_add(1))
-                } else {
-                    None
-                };
-                if let (Some(target), Some((head, _))) = (target, text.rsplit_once(':')) {
-                    *text = format!("{head}:{target}");
-                }
-            }
-        }
-        document.insert("listeners".to_owned(), toml::Value::Array(listeners));
-    }
-    toml::to_string_pretty(&document).map_err(|e| format!("配置生成失败：{e}"))
 }
 
 pub fn format_bytes(bytes: f64) -> String {

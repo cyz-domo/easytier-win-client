@@ -133,6 +133,14 @@ pub fn mono(
     p.text(pos, anchor, text, FontId::monospace(size), color);
 }
 
+pub fn card_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(CARD)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(16))
+}
+
 pub fn card(p: &Painter, r: Rect) {
     p.rect_filled(r, CornerRadius::same(10), CARD);
     p.rect_stroke(
