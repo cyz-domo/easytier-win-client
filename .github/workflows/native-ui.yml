@@ -1,0 +1,33 @@
+name: Native UI (spike)
+
+on:
+  push:
+    branches: [feat/native-ui]
+    paths:
+      - 'native-ui/**'
+      - '.github/workflows/native-ui.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native-ui
+          key: native-ui-spike
+
+      - name: Build
+        run: cargo build --release --manifest-path native-ui/Cargo.toml --target x86_64-pc-windows-msvc
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easytier-native-ui-spike
+          path: native-ui/target/x86_64-pc-windows-msvc/release/easytier-native-ui.exe
+          if-no-files-found: error
