@@ -12,7 +12,7 @@ pub const INPUT: Color32 = Color32::from_rgb(0x1A, 0x1D, 0x22);
 pub const BORDER: Color32 = Color32::from_rgb(0x32, 0x37, 0x40);
 pub const TEXT: Color32 = Color32::from_rgb(0xE8, 0xEA, 0xEE);
 pub const MUTED: Color32 = Color32::from_rgb(0x8B, 0x92, 0x9E);
-pub const DIM: Color32 = Color32::from_rgb(0x5F, 0x66, 0x71);
+pub const DIM: Color32 = Color32::from_rgb(0x6F, 0x77, 0x83);
 pub const OK: Color32 = Color32::from_rgb(0x5A, 0xC8, 0x7E);
 pub const RX: Color32 = Color32::from_rgb(0x5B, 0x9B, 0xFF);
 pub const TX: Color32 = Color32::from_rgb(0x5A, 0xC8, 0x7E);
@@ -54,10 +54,10 @@ pub fn build_style() -> egui::Style {
     style.spacing.interact_size = Vec2::new(36.0, 26.0);
     style
         .text_styles
-        .insert(egui::TextStyle::Body, FontId::proportional(13.0));
+        .insert(egui::TextStyle::Body, FontId::proportional(13.5));
     style
         .text_styles
-        .insert(egui::TextStyle::Button, FontId::proportional(12.5));
+        .insert(egui::TextStyle::Button, FontId::proportional(13.0));
     style
         .text_styles
         .insert(egui::TextStyle::Small, FontId::proportional(11.0));
@@ -85,9 +85,10 @@ pub fn install_cjk_font(ctx: &egui::Context) -> bool {
         let mut data = FontData::from_owned(bytes);
         data.index = 0;
         fonts.font_data.insert("cjk".to_owned(), Arc::new(data));
+        // Keep egui's crisp Latin faces first; YaHei only fills CJK glyphs.
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
             if let Some(list) = fonts.families.get_mut(&family) {
-                list.insert(0, "cjk".to_owned());
+                list.push("cjk".to_owned());
             }
         }
         loaded = true;

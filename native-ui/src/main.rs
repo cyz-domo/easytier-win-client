@@ -263,6 +263,7 @@ struct App {
     config_source: String,
     config_error: Option<String>,
     show_advanced: bool,
+    peer_urls_open: bool,
     secret_visible: bool,
     instance_name: String,
     rpc_port_text: String,
@@ -332,6 +333,7 @@ impl App {
             config_source: String::new(),
             config_error: None,
             show_advanced: false,
+            peer_urls_open: false,
             secret_visible: false,
             instance_name: String::new(),
             rpc_port_text: String::new(),
@@ -1151,7 +1153,7 @@ impl App {
             if selected {
                 p.rect_filled(Rect::from_min_size(Pos2::new(item.left(), item.top() + 12.0), Vec2::new(3.0, item.height() - 24.0)), CornerRadius::same(2), ACCENT);
             }
-            txt(&p, Pos2::new(item.left() + 16.0, item.top() + 12.0), Align2::LEFT_TOP, &inst.name, 13.5, if selected { TEXT } else { MUTED });
+            txt(&p, Pos2::new(item.left() + 16.0, item.top() + 12.0), Align2::LEFT_TOP, truncate(&inst.name, 14), 13.5, if selected { TEXT } else { MUTED });
             let sub = inst.status_label();
             txt(&p, Pos2::new(item.left() + 16.0, item.bottom() - 10.0), Align2::LEFT_BOTTOM, sub, 11.0, MUTED);
             let dot = match inst.observed.as_str() {
@@ -1212,20 +1214,19 @@ impl App {
         }
 
         ui.add_space(10.0);
-        let (foot, _) = ui.allocate_exact_size(Vec2::new(w, 38.0), Sense::hover());
-        if self.font_loaded {
-            txt(&p, Pos2::new(foot.left() + 2.0, foot.top()), Align2::LEFT_TOP, "egui 直接绘制 · 系统字体已加载", 10.5, DIM);
-        } else {
-            txt(&p, Pos2::new(foot.left() + 2.0, foot.top()), Align2::LEFT_TOP, "CJK 字体缺失，中文将显示为方块", 10.5, ERR);
-        }
+        let rows = if self.font_loaded { 1.0 } else { 2.0 };
+        let (foot, _) = ui.allocate_exact_size(Vec2::new(w, 16.0 + rows * 16.0), Sense::hover());
         let (foot_text, foot_color) = if let Some(err) = &self.service_error {
-            (format!("服务不可用 · {}", truncate(err, 26)), ERR)
+            (format!("服务不可用 · {}", truncate(err, 24)), ERR)
         } else if self.service_running {
-            ("已连接后台服务 · 真实数据".to_owned(), OK)
+            ("已连接后台服务".to_owned(), OK)
         } else {
             ("正在连接后台服务…".to_owned(), DIM)
         };
-        txt(&p, Pos2::new(foot.left() + 2.0, foot.top() + 16.0), Align2::LEFT_TOP, foot_text, 10.5, foot_color);
+        txt(&p, Pos2::new(foot.left() + 2.0, foot.top()), Align2::LEFT_TOP, foot_text, 10.5, foot_color);
+        if !self.font_loaded {
+            txt(&p, Pos2::new(foot.left() + 2.0, foot.top() + 16.0), Align2::LEFT_TOP, "CJK 字体缺失，中文将显示为方块", 10.5, ERR);
+        }
     }
 
     fn topbar(&mut self, ui: &mut egui::Ui) {
@@ -1284,16 +1285,22 @@ impl App {
         } else {
             "启动网络"
         };
-        let fill = if !enabled {
-            CARD
+        let (fill, fg, stroke) = if !enabled {
+            if observed == "stopping" {
+                (ERR.gamma_multiply(0.16), ERR, ERR.gamma_multiply(0.55))
+            } else {
+                (CARD, DIM, BORDER)
+            }
         } else if running {
-            CARD_HI
+            let red = if resp.hovered() { ERR.gamma_multiply(0.82) } else { ERR };
+            (red, Color32::WHITE, red)
         } else {
-            ACCENT
+            let blue = if resp.hovered() { ACCENT.gamma_multiply(0.85) } else { ACCENT };
+            (blue, Color32::WHITE, blue)
         };
         p.rect_filled(button, CornerRadius::same(8), fill);
-        p.rect_stroke(button, CornerRadius::same(8), Stroke::new(1.0, BORDER), StrokeKind::Inside);
-        txt(&p, button.center(), Align2::CENTER_CENTER, label, 11.5, if !enabled { DIM } else if running { MUTED } else { Color32::WHITE });
+        p.rect_stroke(button, CornerRadius::same(8), Stroke::new(1.0, stroke), StrokeKind::Inside);
+        txt(&p, button.center(), Align2::CENTER_CENTER, label, 11.5, fg);
         if resp.hovered() && enabled {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
@@ -1821,11 +1828,6 @@ impl App {
                 let (color, text) = if self.service_running { (OK, "运行中") } else { (ERR, "不可用") };
                 ui.label(RichText::new(format!("● {text}")).size(10.5).color(color));
             });
-            ui.label(
-                RichText::new("网络实例进程与内核版本由 Windows 服务 EasyTierService 托管，关闭本程序不会断开已运行网络。")
-                    .size(10.5)
-                    .color(DIM),
-            );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui.button("重试连接").clicked() {
@@ -1857,11 +1859,6 @@ impl App {
                 };
                 ui.label(RichText::new(current).size(10.5).color(MUTED));
             });
-            ui.label(
-                RichText::new("从 GitHub Release 下载 easytier-windows-x86_64 资源包，由后台服务校验、替换并重启内核。")
-                    .size(10.5)
-                    .color(DIM),
-            );
             ui.add_space(8.0);
 
             ui.horizontal(|ui| {
@@ -1896,11 +1893,6 @@ impl App {
                             .hint_text("例如 https://ghfast.top"),
                     );
                 });
-                ui.label(
-                    RichText::new("GitHub 原始地址会拼接到镜像前缀之后：{前缀}/https://github.com/…")
-                        .size(10.5)
-                        .color(DIM),
-                );
             }
 
             ui.add_space(8.0);
@@ -2000,7 +1992,6 @@ impl App {
         ui.add_space(8.0);
         card_frame().show(ui, |ui| {
             ui.label(RichText::new("开机自启").size(14.0).color(TEXT));
-            ui.label(RichText::new("登录 Windows 后自动启动本程序（写入 HKCU Run，仅当前用户）。").size(10.5).color(DIM));
             ui.add_space(4.0);
             let current_enabled = self.autostart.as_ref().map(|a| a.enabled).unwrap_or(false);
             let mut enabled = current_enabled;
@@ -2059,14 +2050,7 @@ impl App {
 
         ui.add_space(8.0);
         card_frame().show(ui, |ui| {
-            ui.label(RichText::new("关于").size(14.0).color(TEXT));
-            ui.label(RichText::new(format!("EasyTier 原生客户端 {VERSION}")).size(11.5).color(MUTED));
-            ui.label(
-                RichText::new("原生 egui / eframe 绘制，不依赖 WebView2；数据来自 EasyTierService 命名管道与 easytier-cli。")
-                    .size(10.5)
-                    .color(DIM),
-            );
-            ui.label(RichText::new("关闭窗口默认隐藏到托盘，网络保持后台运行。").size(10.5).color(DIM));
+            ui.label(RichText::new(format!("EasyTier 原生客户端 {VERSION}")).size(12.0).color(MUTED));
         });
     }
 
@@ -2078,7 +2062,6 @@ impl App {
         let (r, _) = ui.allocate_exact_size(Vec2::new(w, 340.0), Sense::hover());
         card(&p, r);
         txt(&p, Pos2::new(r.left() + 18.0, r.top() + 16.0), Align2::LEFT_TOP, "实时网络流量", 14.0, TEXT);
-        txt(&p, Pos2::new(r.left() + 18.0, r.top() + 38.0), Align2::LEFT_TOP, "上行 / 下行 · 近 60 秒 · 直接由 egui 绘制", 11.0, DIM);
 
         let (last_rx, last_tx) = *self.history.back().unwrap_or(&(0.0, 0.0));
         let peak = self.history.iter().map(|(a, b)| a.max(*b)).fold(0.0f32, f32::max);
@@ -2098,11 +2081,13 @@ impl App {
             x -= 6.0;
         }
 
-        let plot = Rect::from_min_max(Pos2::new(r.left() + 18.0, r.top() + 76.0), Pos2::new(r.right() - 18.0, r.bottom() - 40.0));
-        let max = peak.max(1.0);
+        let plot = Rect::from_min_max(Pos2::new(r.left() + 78.0, r.top() + 58.0), Pos2::new(r.right() - 18.0, r.bottom() - 40.0));
+        let max = nice_speed_max(peak);
         for i in 0..=4 {
-            let y = plot.top() + plot.height() * i as f32 / 4.0;
+            let frac = i as f32 / 4.0;
+            let y = plot.bottom() - plot.height() * frac;
             p.hline(plot.x_range(), y, Stroke::new(1.0, Color32::from_rgb(0x2A, 0x2F, 0x37)));
+            txt(&p, Pos2::new(plot.left() - 8.0, y), Align2::RIGHT_CENTER, service::format_speed(max * frac), 9.5, MUTED);
         }
 
         if !running {
@@ -2213,12 +2198,6 @@ impl App {
                 ui.add_space(8.0);
                 if self.config_dirty {
                     ui.label(RichText::new("有未保存的修改").size(10.5).color(WARN));
-                } else {
-                    ui.label(
-                        RichText::new("修改后点击「保存配置」；运行中修改需要重启网络生效")
-                            .size(10.5)
-                            .color(DIM),
-                    );
                 }
             });
             ui.add_space(10.0);
@@ -2268,19 +2247,22 @@ impl App {
                     changed = true;
                 }
             });
-            if cfg.networking_method == 2 {
-                ui.label(
-                    RichText::new("独立网络：本机仅作为根/监听节点，其他节点通过监听地址加入。")
-                        .size(10.5)
-                        .color(DIM),
+            if cfg.networking_method != 2 {
+                let arrow = if self.peer_urls_open { "▾" } else { "▸" };
+                let header = ui.add(
+                    egui::Button::new(
+                        RichText::new(format!("{arrow} 公共服务器（{}）", cfg.peer_urls.len()))
+                            .size(11.5)
+                            .color(MUTED),
+                    )
+                    .frame(false),
                 );
-            } else {
-                ui.label(
-                    RichText::new("对等节点 / 公共服务器（Peer URL）")
-                        .size(11.0)
-                        .color(MUTED),
-                );
-                changed |= string_list(ui, &mut cfg.peer_urls, "tcp://192.168.1.10:11010");
+                if header.clicked() {
+                    self.peer_urls_open = !self.peer_urls_open;
+                }
+                if self.peer_urls_open {
+                    changed |= string_list(ui, &mut cfg.peer_urls, "tcp://192.168.1.10:11010");
+                }
             }
 
             ui.add_space(4.0);
@@ -2325,7 +2307,6 @@ impl App {
                     egui::TextEdit::singleline(&mut rpc_text).hint_text("15888"),
                 );
                 changed |= resp.changed();
-                ui.label(RichText::new("每个实例独立，重启后生效").size(10.5).color(DIM));
             });
             ui.horizontal(|ui| {
                 ui.add_sized(
@@ -2336,11 +2317,6 @@ impl App {
                     auto_start = !auto_start;
                     changed = true;
                 }
-                ui.label(
-                    RichText::new("服务运行后自动连接本网络（需后台服务）")
-                        .size(10.5)
-                        .color(DIM),
-                );
             });
             ui.horizontal(|ui| {
                 ui.add_sized(
@@ -2351,11 +2327,6 @@ impl App {
                     remote = !remote;
                     changed = true;
                 }
-                ui.label(
-                    RichText::new("允许虚拟网内其它设备修改本实例（需填写白名单）")
-                        .size(10.5)
-                        .color(DIM),
-                );
             });
             if remote {
                 changed |= text_row(
@@ -2386,11 +2357,6 @@ impl App {
                     }
                 }
             });
-            ui.label(
-                RichText::new("内核日志级别是启动参数，运行中修改需要重启网络。")
-                    .size(10.5)
-                    .color(DIM),
-            );
         });
 
         ui.add_space(8.0);
@@ -2409,12 +2375,8 @@ impl App {
             ui.add_space(8.0);
             card_frame().show(ui, |ui| {
                 ui.label(RichText::new("监听与转发").size(14.0).color(TEXT));
-                ui.label(
-                    RichText::new("监听器。多实例并存时使用 0 端口由系统自动分配。")
-                        .size(10.5)
-                        .color(DIM),
-                );
-                ui.add_space(4.0);
+                ui.add_space(2.0);
+                ui.label(RichText::new("监听器").size(11.0).color(MUTED));
                 changed |= string_list(ui, &mut cfg.listener_urls, "tcp://0.0.0.0:11010");
                 ui.add_space(6.0);
                 ui.label(
@@ -2483,11 +2445,7 @@ impl App {
             ui.add_space(8.0);
             card_frame().show(ui, |ui| {
                 ui.label(RichText::new("路由与子网").size(14.0).color(TEXT));
-                ui.label(
-                    RichText::new("子网代理（把本机可达的网段共享给虚拟网络）")
-                        .size(11.0)
-                        .color(MUTED),
-                );
+                ui.label(RichText::new("子网代理").size(11.0).color(MUTED));
                 changed |= string_list(ui, &mut cfg.proxy_cidrs, "10.0.0.0/24");
                 ui.add_space(6.0);
                 if bool_toggle_row(ui, "手动路由", &mut cfg.enable_manual_routes) {
@@ -2723,33 +2681,56 @@ impl App {
 
         p.line_segment([Pos2::new(r.left() + 18.0, r.top() + 46.0), Pos2::new(r.right() - 18.0, r.top() + 46.0)], Stroke::new(1.0, BORDER));
 
-        let mut y = r.top() + 58.0;
-        let mut shown = 0;
-        for line in self.logs.iter().filter(|l| self.log_filter.matches(&l.level)) {
-            let lc = match line.level.as_str() {
-                "INFO" => RX,
-                "WARN" => WARN,
-                "ERROR" => ERR,
-                "DEBUG" => DIM,
-                _ => MUTED,
-            };
-            mono(&p, Pos2::new(r.left() + 18.0, y), Align2::LEFT_TOP, &line.time, 10.5, DIM);
-            mono(&p, Pos2::new(r.left() + 92.0, y), Align2::LEFT_TOP, &line.level, 10.5, lc);
-            mono(&p, Pos2::new(r.left() + 142.0, y), Align2::LEFT_TOP, truncate(&line.text, 110), 11.0, TEXT);
-            y += 18.0;
-            shown += 1;
-            if y > r.bottom() - 18.0 {
-                break;
-            }
-        }
-        if shown == 0 {
-            let message = if self.logs.is_empty() {
-                "暂无日志；启动网络后将显示内核日志"
-            } else {
-                "当前筛选条件下没有日志"
-            };
-            txt(&p, Pos2::new(r.left() + 18.0, r.top() + 64.0), Align2::LEFT_TOP, message, 11.0, DIM);
-        }
+        let list_rect = Rect::from_min_max(
+            Pos2::new(r.left() + 18.0, r.top() + 56.0),
+            Pos2::new(r.right() - 10.0, r.bottom() - 12.0),
+        );
+        let mut list_ui = ui.new_child(egui::UiBuilder::new().max_rect(list_rect));
+        list_ui.spacing_mut().item_spacing.y = 4.0;
+        let wrap_w = list_rect.width() - 14.0;
+        ScrollArea::vertical()
+            .id_salt(("logs", self.active.as_deref().unwrap_or("")))
+            .auto_shrink([false, false])
+            .show(&mut list_ui, |ui| {
+                ui.set_width(wrap_w);
+                let mut shown = 0;
+                for line in self.logs.iter().filter(|l| self.log_filter.matches(&l.level)) {
+                    let lc = match line.level.as_str() {
+                        "INFO" => RX,
+                        "WARN" => WARN,
+                        "ERROR" => ERR,
+                        "DEBUG" => DIM,
+                        _ => MUTED,
+                    };
+                    let mut job = egui::text::LayoutJob::default();
+                    job.wrap.max_width = wrap_w;
+                    job.append(&format!("{}  ", line.time), 0.0, egui::TextFormat {
+                        font_id: FontId::monospace(10.5),
+                        color: DIM,
+                        ..Default::default()
+                    });
+                    job.append(&format!("{:<5} ", line.level), 0.0, egui::TextFormat {
+                        font_id: FontId::monospace(10.5),
+                        color: lc,
+                        ..Default::default()
+                    });
+                    job.append(&line.text, 0.0, egui::TextFormat {
+                        font_id: FontId::monospace(11.0),
+                        color: TEXT,
+                        ..Default::default()
+                    });
+                    ui.add(egui::Label::new(job).wrap());
+                    shown += 1;
+                }
+                if shown == 0 {
+                    let message = if self.logs.is_empty() {
+                        "暂无日志；启动网络后将显示内核日志"
+                    } else {
+                        "当前筛选条件下没有日志"
+                    };
+                    ui.label(RichText::new(message).size(11.0).color(DIM));
+                }
+            });
     }
 }
 
@@ -2925,6 +2906,22 @@ fn truncate(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn nice_speed_max(peak: f32) -> f32 {
+    let raw = (peak * 1.15).max(0.01);
+    let exp = 10f32.powf(raw.log10().floor());
+    let mantissa = raw / exp;
+    let step = if mantissa <= 1.0 {
+        1.0
+    } else if mantissa <= 2.0 {
+        2.0
+    } else if mantissa <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    step * exp
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_events(ctx);
@@ -2974,7 +2971,7 @@ impl eframe::App for App {
         *ui.style_mut() = self.style.clone();
 
         let screen = ui.max_rect();
-        let sw = 296.0;
+        let sw = 240.0;
         {
             let bg = ui.painter();
             bg.rect_filled(screen, CornerRadius::ZERO, BG);
