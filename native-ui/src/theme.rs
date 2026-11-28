@@ -20,10 +20,13 @@ pub const WARN: Color32 = Color32::from_rgb(0xE0, 0xA4, 0x58);
 pub const ERR: Color32 = Color32::from_rgb(0xE0, 0x6C, 0x75);
 pub const ACCENT: Color32 = Color32::from_rgb(0x4C, 0x8D, 0xFF);
 
-pub fn setup(ctx: &egui::Context) -> bool {
+pub fn setup(ctx: &egui::Context) -> (bool, egui::Style) {
     let loaded = install_cjk_font(ctx);
+    (loaded, build_style())
+}
 
-    let mut style = (*ctx.style()).clone();
+pub fn build_style() -> egui::Style {
+    let mut style = egui::Style::default();
     style.visuals = egui::Visuals::dark();
     style.visuals.panel_fill = Color32::TRANSPARENT;
     style.visuals.window_fill = BG;
@@ -65,8 +68,7 @@ pub fn setup(ctx: &egui::Context) -> bool {
         .text_styles
         .insert(egui::TextStyle::Monospace, FontId::monospace(12.0));
 
-    ctx.set_style(style);
-    loaded
+    style
 }
 
 /// Loads a system CJK font so Chinese glyphs render without bundling a font file.

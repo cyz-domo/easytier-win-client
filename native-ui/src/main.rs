@@ -97,12 +97,13 @@ struct App {
     history: VecDeque<(f32, f32)>,
     next_sample: f64,
     font_loaded: bool,
+    style: egui::Style,
     logs: Vec<(String, &'static str, &'static str)>,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let font_loaded = theme::setup(&cc.egui_ctx);
+        let (font_loaded, style) = theme::setup(&cc.egui_ctx);
 
         let mut history = VecDeque::with_capacity(120);
         for i in 0..90 {
@@ -151,6 +152,7 @@ impl App {
             history,
             next_sample: 0.0,
             font_loaded,
+            style,
             logs,
         }
     }
@@ -585,24 +587,40 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        *ui.style_mut() = self.style.clone();
+
+        let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
         self.tick(now);
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
 
-        let screen = ctx.screen_rect();
-        let bg = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("app-bg")));
-        bg.rect_filled(screen, CornerRadius::ZERO, BG);
+        let screen = ui.max_rect();
         let sw = 296.0;
-        bg.rect_filled(Rect::from_min_size(screen.min, Vec2::new(sw, screen.height())), CornerRadius::ZERO, SIDEBAR);
-        bg.line_segment([Pos2::new(sw, screen.top()), Pos2::new(sw, screen.bottom())], Stroke::new(1.0, BORDER));
+        {
+            let bg = ui.painter();
+            bg.rect_filled(screen, CornerRadius::ZERO, BG);
+            bg.rect_filled(
+                Rect::from_min_size(screen.min, Vec2::new(sw, screen.height())),
+                CornerRadius::ZERO,
+                SIDEBAR,
+            );
+            bg.line_segment(
+                [
+                    Pos2::new(screen.left() + sw, screen.top()),
+                    Pos2::new(screen.left() + sw, screen.bottom()),
+                ],
+                Stroke::new(1.0, BORDER),
+            );
+        }
 
-        egui::SidePanel::left("sidebar")
-            .exact_width(sw)
+        egui::Panel::left("sidebar")
+            .exact_size(sw)
             .resizable(false)
-            .show(ctx, |ui| self.sidebar(ui));
+            .show_separator_line(false)
+            .show(ui, |ui| self.sidebar(ui));
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.topbar(ui);
             ScrollArea::vertical()
                 .auto_shrink([false, false])
