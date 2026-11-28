@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::collections::VecDeque;
 
 use eframe::egui::{
@@ -7,6 +9,98 @@ use eframe::egui::{
 
 mod theme;
 use theme::*;
+
+#[cfg(windows)]
+mod tray {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    use tray_icon::{
+        Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    };
+
+    static SHOW: AtomicBool = AtomicBool::new(false);
+    static QUIT: AtomicBool = AtomicBool::new(false);
+
+    pub fn take_show() -> bool {
+        SHOW.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn take_quit() -> bool {
+        QUIT.swap(false, Ordering::Relaxed)
+    }
+
+    fn icon() -> Icon {
+        const N: u32 = 32;
+        let mut rgba = vec![0u8; (N * N * 4) as usize];
+        let c = N as f32 / 2.0;
+        for y in 0..N {
+            for x in 0..N {
+                let dx = x as f32 + 0.5 - c;
+                let dy = y as f32 + 0.5 - c;
+                let d = (dx * dx + dy * dy).sqrt();
+                if d > 15.0 {
+                    continue;
+                }
+                let (r, g, b) = if d < 5.5 {
+                    (0xE8, 0xEA, 0xEE)
+                } else if d < 10.0 {
+                    (0x17, 0x19, 0x1D)
+                } else {
+                    (0x4C, 0x8D, 0xFF)
+                };
+                let i = ((y * N + x) * 4) as usize;
+                rgba[i] = r;
+                rgba[i + 1] = g;
+                rgba[i + 2] = b;
+                rgba[i + 3] = 255;
+            }
+        }
+        Icon::from_rgba(rgba, N, N).expect("valid tray icon")
+    }
+
+    pub fn setup(ctx: &egui::Context) -> Option<TrayIcon> {
+        let menu = Menu::new();
+        let show = MenuItem::new("显示主界面", true, None);
+        let quit = MenuItem::new("退出", true, None);
+        menu.append(&show).ok()?;
+        menu.append(&quit).ok()?;
+        let show_id = show.id().clone();
+        let quit_id = quit.id().clone();
+
+        let menu_ctx = ctx.clone();
+        MenuEvent::set_event_handler(Some(Arc::new(move |e: MenuEvent| {
+            if e.id == show_id {
+                SHOW.store(true, Ordering::Relaxed);
+                menu_ctx.request_repaint();
+            } else if e.id == quit_id {
+                QUIT.store(true, Ordering::Relaxed);
+                menu_ctx.request_repaint();
+            }
+        })));
+
+        let tray_ctx = ctx.clone();
+        TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = e
+            {
+                SHOW.store(true, Ordering::Relaxed);
+                tray_ctx.request_repaint();
+            }
+        }));
+
+        TrayIconBuilder::new()
+            .with_tooltip("EasyTier · 原生 UI 预览")
+            .with_menu(Box::new(menu))
+            .with_icon(icon())
+            .build()
+            .ok()
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -98,6 +192,9 @@ struct App {
     next_sample: f64,
     font_loaded: bool,
     style: egui::Style,
+    quitting: bool,
+    #[cfg(windows)]
+    tray: Option<tray_icon::TrayIcon>,
     logs: Vec<(String, &'static str, &'static str)>,
 }
 
@@ -153,6 +250,9 @@ impl App {
             next_sample: 0.0,
             font_loaded,
             style,
+            quitting: false,
+            #[cfg(windows)]
+            tray: tray::setup(&cc.egui_ctx),
             logs,
         }
     }
@@ -587,13 +687,32 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        *ui.style_mut() = self.style.clone();
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        {
+            if tray::take_quit() {
+                self.quitting = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            if tray::take_show() && !self.quitting {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                ctx.request_repaint();
+            }
+        }
 
-        let ctx = ui.ctx().clone();
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
         let now = ctx.input(|i| i.time);
         self.tick(now);
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        *ui.style_mut() = self.style.clone();
 
         let screen = ui.max_rect();
         let sw = 296.0;
@@ -641,11 +760,15 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result<()> {
+    let start_hidden = std::env::args().any(|a| {
+        matches!(a.as_str(), "--minimized" | "--tray" | "--silent")
+    });
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 760.0])
             .with_min_inner_size([960.0, 640.0])
-            .with_title("EasyTier · 原生 UI 预览"),
+            .with_title("EasyTier · 原生 UI 预览")
+            .with_visible(!start_hidden),
         ..Default::default()
     };
     eframe::run_native(
