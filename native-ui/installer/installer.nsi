@@ -1,11 +1,10 @@
-; Standalone NSIS installer for the native EasyTier client.
+﻿; Standalone NSIS installer for the native EasyTier client.
 ; Build with: makensis /DAPP_VERSION=0.1.5 /DARCH=x64 /DSTAGE=... /DOUTFILE=... /DICON=... installer.nsi
 ; Registers EasyTierService for the original interactive user (named-pipe ACL),
 ; stops/removes any previous service before upgrading, and cleans up on uninstall.
 
 Unicode true
 SetCompressor /SOLID lzma
-SetRegView 64
 RequestExecutionLevel admin
 
 !include "MUI2.nsh"
@@ -164,6 +163,9 @@ Function InstallService
 FunctionEnd
 
 Function .onInit
+  ; NSIS >= 3.11 rejects SetRegView at global scope; the stub is 32-bit, so
+  ; both InstallDirRegKey and HKLM writes need the 64-bit view explicitly.
+  SetRegView 64
   IfSilent init_done
   nsExec::Exec 'sc.exe query EasyTierService'
   Pop $0
@@ -175,6 +177,7 @@ Function .onInit
 FunctionEnd
 
 Section "EasyTier Native Client" SecMain
+  SetRegView 64
   Call StopServiceAndCores
 
   SetOutPath "$INSTDIR"
@@ -202,6 +205,7 @@ Section "EasyTier Native Client" SecMain
 SectionEnd
 
 Section "Uninstall"
+  SetRegView 64
   Call un.StopServiceAndCores
 
   Delete "$INSTDIR\easytier-native-ui.exe"
