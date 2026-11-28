@@ -18,6 +18,25 @@ use theme::*;
 
 const VERSION: &str = "v0.1.5";
 
+fn app_icon() -> (u32, u32, Vec<u8>) {
+    static ICON: &[u8] = include_bytes!("../assets/icon.png");
+    let mut reader = png::Decoder::new(std::io::Cursor::new(ICON))
+        .read_info()
+        .expect("read icon png");
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).expect("decode icon png");
+    buf.truncate(info.buffer_size());
+    if info.color_type == png::ColorType::Rgba {
+        (info.width, info.height, buf)
+    } else {
+        let mut rgba = Vec::with_capacity((info.width * info.height * 4) as usize);
+        for px in buf.chunks_exact(3) {
+            rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+        }
+        (info.width, info.height, rgba)
+    }
+}
+
 #[cfg(windows)]
 mod tray {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,32 +71,8 @@ mod tray {
     }
 
     fn icon() -> Icon {
-        const N: u32 = 32;
-        let mut rgba = vec![0u8; (N * N * 4) as usize];
-        let c = N as f32 / 2.0;
-        for y in 0..N {
-            for x in 0..N {
-                let dx = x as f32 + 0.5 - c;
-                let dy = y as f32 + 0.5 - c;
-                let d = (dx * dx + dy * dy).sqrt();
-                if d > 15.0 {
-                    continue;
-                }
-                let (r, g, b) = if d < 5.5 {
-                    (0xE8, 0xEA, 0xEE)
-                } else if d < 10.0 {
-                    (0x17, 0x19, 0x1D)
-                } else {
-                    (0x4C, 0x8D, 0xFF)
-                };
-                let i = ((y * N + x) * 4) as usize;
-                rgba[i] = r;
-                rgba[i + 1] = g;
-                rgba[i + 2] = b;
-                rgba[i + 3] = 255;
-            }
-        }
-        Icon::from_rgba(rgba, N, N).expect("valid tray icon")
+        let (w, h, rgba) = super::app_icon();
+        Icon::from_rgba(rgba, w, h).expect("valid tray icon")
     }
 
     pub fn setup(ctx: &eframe::egui::Context) -> Option<TrayMenu> {
@@ -305,6 +300,7 @@ struct App {
     toast: Option<(String, f64, bool)>,
     busy: Option<&'static str>,
     font_loaded: bool,
+    icon_tex: egui::TextureHandle,
     style: egui::Style,
     quitting: bool,
     hidden: bool,
@@ -323,6 +319,15 @@ fn zero_history() -> VecDeque<(f32, f32)> {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, start_hidden: bool) -> Self {
         let (font_loaded, style) = theme::setup(&cc.egui_ctx);
+        let (icon_w, icon_h, icon_rgba) = app_icon();
+        let icon_tex = cc.egui_ctx.load_texture(
+            "app-icon",
+            egui::ColorImage::from_rgba_unmultiplied(
+                [icon_w as usize, icon_h as usize],
+                &icon_rgba,
+            ),
+            egui::TextureOptions::LINEAR,
+        );
         let (actions, events) = service::spawn(cc.egui_ctx.clone());
         let mut app = Self {
             tab: Tab::Status,
@@ -375,6 +380,7 @@ impl App {
             toast: None,
             busy: None,
             font_loaded,
+            icon_tex,
             style,
             quitting: false,
             hidden: start_hidden,
@@ -1112,7 +1118,16 @@ impl App {
         let ctx = ui.ctx().clone();
 
         let (brand, _) = ui.allocate_exact_size(Vec2::new(w, 36.0), Sense::hover());
-        p.circle_filled(Pos2::new(brand.left() + 9.0, brand.center().y), 7.0, ACCENT);
+        let icon_rect = Rect::from_center_size(
+            Pos2::new(brand.left() + 9.0, brand.center().y),
+            Vec2::splat(18.0),
+        );
+        p.image(
+            self.icon_tex.id(),
+            icon_rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
         txt(&p, Pos2::new(brand.left() + 24.0, brand.center().y), Align2::LEFT_CENTER, "EasyTier", 14.5, TEXT);
         txt(&p, Pos2::new(brand.left() + 26.0 + text_w("EasyTier", 14.5), brand.center().y), Align2::LEFT_CENTER, "native", 10.0, DIM);
         let vw = text_w(VERSION, 10.5) + 14.0;
@@ -3041,11 +3056,19 @@ fn main() -> eframe::Result<()> {
         matches!(a.as_str(), "--minimized" | "--tray" | "--silent")
     });
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1120.0, 760.0])
-            .with_min_inner_size([960.0, 640.0])
-            .with_title("EasyTier · 原生客户端")
-            .with_visible(!start_hidden),
+        viewport: {
+            let (icon_w, icon_h, icon_rgba) = app_icon();
+            egui::ViewportBuilder::default()
+                .with_inner_size([1120.0, 760.0])
+                .with_min_inner_size([960.0, 640.0])
+                .with_title("EasyTier · 原生客户端")
+                .with_icon(egui::IconData {
+                    rgba: icon_rgba,
+                    width: icon_w,
+                    height: icon_h,
+                })
+                .with_visible(!start_hidden)
+        },
         ..Default::default()
     };
     eframe::run_native(
