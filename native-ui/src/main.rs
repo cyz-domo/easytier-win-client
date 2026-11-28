@@ -2702,24 +2702,19 @@ impl App {
                         "DEBUG" => DIM,
                         _ => MUTED,
                     };
-                    let mut job = egui::text::LayoutJob::default();
-                    job.wrap.max_width = wrap_w;
-                    job.append(&format!("{}  ", line.time), 0.0, egui::TextFormat {
-                        font_id: FontId::monospace(10.5),
-                        color: DIM,
-                        ..Default::default()
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let (pre, _) = ui.allocate_exact_size(Vec2::new(92.0, 15.0), Sense::hover());
+                        let painter = ui.painter();
+                        painter.text(pre.left_top(), Align2::LEFT_TOP, &line.time, FontId::monospace(10.5), DIM);
+                        painter.text(Pos2::new(pre.left() + 56.0, pre.top()), Align2::LEFT_TOP, &line.level, FontId::monospace(10.5), lc);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&line.text).monospace().size(11.0).color(TEXT),
+                            )
+                            .wrap(),
+                        );
                     });
-                    job.append(&format!("{:<5} ", line.level), 0.0, egui::TextFormat {
-                        font_id: FontId::monospace(10.5),
-                        color: lc,
-                        ..Default::default()
-                    });
-                    job.append(&line.text, 0.0, egui::TextFormat {
-                        font_id: FontId::monospace(11.0),
-                        color: TEXT,
-                        ..Default::default()
-                    });
-                    ui.add(egui::Label::new(job).wrap());
                     shown += 1;
                 }
                 if shown == 0 {
