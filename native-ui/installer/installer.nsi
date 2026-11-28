@@ -50,6 +50,9 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "EasyTier"
 
 ; Stop the service (if present), kill stack processes, then delete the SCM entry.
 !macro STOP_SERVICE_BODY
+  ; Uninstaller pages do not run MUI's plugin-dir init in /S mode; without this
+  ; FileOpen/nsExec target an empty $PLUGINSDIR and the cleanup silently no-ops.
+  InitPluginsDir
   DetailPrint "停止 EasyTier 服务与进程..."
   FileOpen $1 "$PLUGINSDIR\stop-all.ps1" w
   FileWrite $1 "if (Get-Service EasyTierService -ErrorAction SilentlyContinue) {$\r$\n"
@@ -60,7 +63,14 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "EasyTier"
   FileWrite $1 "  }$\r$\n"
   FileWrite $1 "}$\r$\n"
   FileWrite $1 "@('easytier-native-ui', 'easytier-service', 'easytier-core', 'easytier-cli') | ForEach-Object {$\r$\n"
-  FileWrite $1 "  Get-Process -Name $$_ -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $1 "  $$p = Get-Process -Name $$_ -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $1 "  if ($$p) {$\r$\n"
+  FileWrite $1 "    $$p | Stop-Process -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $1 "    for ($$j = 0; $$j -lt 40; $$j++) {$\r$\n"
+  FileWrite $1 "      if (-not (Get-Process -Name $$_ -ErrorAction SilentlyContinue)) { break }$\r$\n"
+  FileWrite $1 "      Start-Sleep -Milliseconds 250$\r$\n"
+  FileWrite $1 "    }$\r$\n"
+  FileWrite $1 "  }$\r$\n"
   FileWrite $1 "}$\r$\n"
   FileWrite $1 "@('WinDivert', 'WinDivert14', 'WinDivert22') | ForEach-Object {$\r$\n"
   FileWrite $1 "  & sc.exe stop $$_ 2>$$null; & sc.exe delete $$_ 2>$$null$\r$\n"
@@ -74,8 +84,12 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "EasyTier"
   FileWrite $1 "  }$\r$\n"
   FileWrite $1 "}$\r$\n"
   FileClose $1
-  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\stop-all.ps1"'
-  Pop $0
+  ${IfNot} ${FileExists} "$PLUGINSDIR\stop-all.ps1"
+    DetailPrint "警告：无法写出停止脚本，跳过服务与进程清理。"
+  ${Else}
+    nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\stop-all.ps1"'
+    Pop $0
+  ${EndIf}
 !macroend
 
 Function StopServiceAndCores
@@ -89,6 +103,7 @@ FunctionEnd
 ; Resolve the original interactive user's SID via the explorer process owner.
 ; The elevated admin token would yield the wrong SID for named-pipe ACLs.
 Function ResolveUserSid
+  InitPluginsDir
   StrCpy $R8 ""
   FileOpen $1 "$PLUGINSDIR\resolve-sid.ps1" w
   FileWrite $1 "$$o = Get-CimInstance Win32_Process | Where-Object Name -eq 'explorer.exe' | Select-Object -First 1$\r$\n"
@@ -208,10 +223,26 @@ Section "Uninstall"
   SetRegView 64
   Call un.StopServiceAndCores
 
-  Delete "$INSTDIR\easytier-native-ui.exe"
-  Delete "$INSTDIR\easytier-service.exe"
+  ; TerminateProcess returns before the kernel releases the image section, and
+  ; AV scanners (Huorong) may hold a fresh handle; retry before giving up.
+  StrCpy $0 0
+  un_delete_service:
+    Delete "$INSTDIR\easytier-service.exe"
+    ${IfNot} ${FileExists} "$INSTDIR\easytier-service.exe"
+      Goto un_delete_done
+    ${EndIf}
+    IntOp $0 $0 + 1
+    ${If} $0 < 20
+      Sleep 300
+      Goto un_delete_service
+    ${EndIf}
+    DetailPrint "警告：easytier-service.exe 仍被占用，已安排在重启后删除。"
+    Delete /REBOOTOK "$INSTDIR\easytier-service.exe"
+  un_delete_done:
+
+  Delete /REBOOTOK "$INSTDIR\easytier-native-ui.exe"
   Delete "$INSTDIR\interactive-user.sid"
-  RMDir /r "$INSTDIR\core"
+  RMDir /r /REBOOTOK "$INSTDIR\core"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 
