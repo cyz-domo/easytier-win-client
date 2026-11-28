@@ -255,50 +255,333 @@ fn start_public_fetch(picker: &mut PublicPicker) {
     picker.rx = Some(rx);
 }
 
-fn render_public_node(
+fn glass_window_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::window(&ctx.style())
+        .fill(Color32::from_rgba_unmultiplied(0x24, 0x28, 0x2F, 246))
+        .stroke(Stroke::new(1.0, Color32::from_white_alpha(28)))
+        .corner_radius(CornerRadius::same(16))
+        .inner_margin(egui::Margin::symmetric(20, 18))
+}
+
+fn modal_scrim(ctx: &egui::Context, id: &str) {
+    egui::Area::new(egui::Id::new(id))
+        .order(egui::Order::Middle)
+        .fixed_pos(Pos2::ZERO)
+        .show(ctx, |ui| {
+            let rect = ctx.screen_rect();
+            ui.painter()
+                .rect_filled(rect, 0.0, Color32::from_black_alpha(110));
+            ui.allocate_rect(rect, Sense::click());
+        });
+}
+
+fn modal_header(ui: &mut egui::Ui, title: &str, subtitle: &str, close: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(RichText::new(title).size(16.0).strong().color(TEXT));
+            if !subtitle.is_empty() {
+                ui.label(RichText::new(subtitle).size(10.5).color(DIM));
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            let btn = egui::Button::new(RichText::new("×").size(16.0).color(MUTED))
+                .frame(false)
+                .min_size(Vec2::new(24.0, 24.0));
+            if ui.add(btn).on_hover_text("关闭").clicked() {
+                *close = true;
+            }
+        });
+    });
+    ui.add_space(8.0);
+}
+
+fn chip(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) {
+    egui::Frame::new()
+        .fill(bg)
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(9.5).color(fg));
+        });
+}
+
+fn glass_section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(Color32::from_white_alpha(6))
+        .stroke(Stroke::new(1.0, Color32::from_white_alpha(14)))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(title).size(10.5).color(DIM));
+            ui.add_space(5.0);
+            add(ui);
+        });
+    ui.add_space(8.0);
+}
+
+fn field_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(RichText::new(text).size(11.0).color(MUTED));
+}
+
+fn text_input(ui: &mut egui::Ui, value: &mut String, hint: &str, password: bool) {
+    let mut edit = egui::TextEdit::singleline(value).frame(false).hint_text(hint);
+    if password {
+        edit = edit.password(true);
+    }
+    egui::Frame::new()
+        .fill(INPUT)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add_sized([ui.available_width(), 20.0], edit);
+        });
+}
+
+fn method_card(ui: &mut egui::Ui, selected: bool, title: &str, desc: &str) -> bool {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 52.0), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let p = ui.painter();
+    p.rect_filled(
+        rect,
+        CornerRadius::same(10),
+        if selected {
+            Color32::from_rgba_unmultiplied(0x2C, 0x4A, 0x7A, 180)
+        } else {
+            Color32::from_white_alpha(5)
+        },
+    );
+    p.rect_stroke(
+        rect,
+        CornerRadius::same(10),
+        Stroke::new(1.0, if selected { ACCENT } else { BORDER }),
+        StrokeKind::Inside,
+    );
+    p.text(
+        Pos2::new(rect.left() + 12.0, rect.top() + 9.0),
+        Align2::LEFT_TOP,
+        title,
+        FontId::proportional(12.0),
+        if selected { TEXT } else { MUTED },
+    );
+    p.text(
+        Pos2::new(rect.left() + 12.0, rect.top() + 28.0),
+        Align2::LEFT_TOP,
+        desc,
+        FontId::proportional(9.5),
+        DIM,
+    );
+    resp.clicked()
+}
+
+fn public_node_title(node: &public_nodes::PublicNode) -> String {
+    let mut title = node.name.clone();
+    while let Some(scheme_idx) = title.find("://") {
+        let start = title[..scheme_idx]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| c.is_ascii_alphanumeric() || matches!(*c, '_' | '+' | '-'))
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(scheme_idx);
+        let end = title[scheme_idx..]
+            .char_indices()
+            .find(|(_, c)| c.is_whitespace() || "（(【[，,）)】]".contains(*c))
+            .map(|(i, _)| scheme_idx + i)
+            .unwrap_or(title.len());
+        title.replace_range(start..end, "");
+    }
+    let cleaned = title
+        .trim_matches(|c: char| c.is_whitespace() || "（）()【】[]·-/|:：".contains(c))
+        .trim();
+    let host = node
+        .address
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(node.address.as_str());
+    if cleaned.is_empty() || cleaned == node.description.trim() {
+        host.to_owned()
+    } else {
+        cleaned.to_owned()
+    }
+}
+
+fn group_header(ui: &mut egui::Ui, label: &str, count: usize, accent: Color32) {
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(6.0, 6.0), Sense::hover());
+        ui.painter().circle_filled(rect.center(), 3.0, accent);
+        ui.label(RichText::new(label).size(11.0).strong().color(MUTED));
+        ui.label(RichText::new(count.to_string()).size(10.0).color(DIM));
+    });
+    ui.add_space(4.0);
+}
+
+fn public_node_card(
     ui: &mut egui::Ui,
     node: &public_nodes::PublicNode,
     existing: &[String],
     add: &mut Option<String>,
 ) {
     let already = existing.iter().any(|u| u == &node.address);
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(truncate(&node.name, 26))
-                .size(11.5)
-                .color(if node.online { TEXT } else { DIM }),
-        );
-        ui.label(RichText::new(&node.address).monospace().size(10.0).color(MUTED));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if already {
-                ui.label(RichText::new("已添加").size(10.0).color(DIM));
-            } else if ui.small_button("添加").clicked() {
-                *add = Some(node.address.clone());
-            }
-            let ping = match node.local_ping {
-                Some(ms) if ms >= 2 => format!("{ms} ms"),
-                _ => "—".to_owned(),
-            };
-            let ping_color = match node.local_ping {
-                Some(ms) if ms < 100 => RX,
-                Some(ms) if ms < 250 => WARN,
-                _ => MUTED,
-            };
-            ui.label(RichText::new(ping).size(10.0).color(ping_color));
-            if node.official {
-                ui.label(RichText::new("官方").size(9.5).color(ACCENT));
-            }
-            if !node.online {
-                ui.label(RichText::new("离线").size(9.5).color(DIM));
-            }
-            if node.masked {
-                ui.label(RichText::new("掩码").size(9.5).color(DIM));
-            }
-            if node.can_relay {
-                ui.label(RichText::new("中转").size(9.5).color(MUTED));
+    let resp = egui::Frame::new()
+        .fill(Color32::from_white_alpha(7))
+        .stroke(Stroke::new(1.0, Color32::from_white_alpha(16)))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(egui::Margin::symmetric(13, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let row_w = ui.available_width();
+            ui.allocate_ui_with_layout(
+                Vec2::new(row_w, 22.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(
+                        RichText::new("●")
+                            .size(7.5)
+                            .color(if node.online { OK } else { DIM }),
+                    );
+                    ui.allocate_ui_with_layout(
+                        Vec2::new((ui.available_width() - 74.0).max(80.0), 22.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(public_node_title(node))
+                                        .size(12.5)
+                                        .color(if node.online { TEXT } else { MUTED }),
+                                )
+                                .truncate(),
+                            );
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if already {
+                            chip(ui, "✓ 已添加", DIM, Color32::from_white_alpha(8));
+                        } else {
+                            let btn = egui::Button::new(
+                                RichText::new("＋ 添加").size(11.0).color(Color32::WHITE),
+                            )
+                            .fill(ACCENT)
+                            .stroke(Stroke::NONE)
+                            .corner_radius(CornerRadius::same(7))
+                            .min_size(Vec2::new(62.0, 22.0));
+                            if ui.add(btn).clicked() {
+                                *add = Some(node.address.clone());
+                            }
+                        }
+                    });
+                },
+            );
+            ui.add_space(3.0);
+            let row_w = ui.available_width();
+            ui.allocate_ui_with_layout(
+                Vec2::new(row_w, 20.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new((ui.available_width() - 300.0).max(80.0), 20.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&node.address)
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(MUTED),
+                                )
+                                .truncate(),
+                            );
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(p) = node.uptime_pct {
+                            let color = if p >= 99.0 {
+                                OK
+                            } else if p >= 95.0 {
+                                WARN
+                            } else {
+                                ERR
+                            };
+                            chip(
+                                ui,
+                                &format!("{p:.1}% / 24h"),
+                                color,
+                                Color32::from_white_alpha(7),
+                            );
+                        }
+                        match node.local_ping {
+                            Some(ms) if ms >= 2 => {
+                                let color = if ms < 80 {
+                                    RX
+                                } else if ms < 200 {
+                                    WARN
+                                } else {
+                                    ERR
+                                };
+                                chip(ui, &format!("{ms} ms"), color, Color32::from_white_alpha(7));
+                            }
+                            _ => chip(ui, "延迟 —", DIM, Color32::from_white_alpha(7)),
+                        }
+                        if node.masked {
+                            chip(ui, "掩码地址", DIM, Color32::from_white_alpha(7));
+                        }
+                        if node.can_relay {
+                            chip(ui, "可中转", MUTED, Color32::from_white_alpha(7));
+                        } else {
+                            chip(ui, "禁中转", WARN, Color32::from_white_alpha(7));
+                        }
+                        if !node.online {
+                            chip(ui, "离线", ERR, Color32::from_white_alpha(7));
+                        }
+                        if node.official {
+                            chip(ui, "官方", ACCENT, Color32::from_white_alpha(10));
+                        }
+                    });
+                },
+            );
+            if !node.description.is_empty() {
+                ui.add_space(2.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&node.description)
+                            .size(9.5)
+                            .color(DIM),
+                    )
+                    .truncate(),
+                );
             }
         });
+    resp.response.on_hover_ui(|ui| {
+        ui.set_max_width(420.0);
+        ui.label(RichText::new(public_node_title(node)).strong());
+        ui.label(
+            RichText::new(&node.address)
+                .monospace()
+                .size(11.0)
+                .color(MUTED),
+        );
+        ui.label(RichText::new(&node.name).size(10.0).color(DIM));
+        if !node.description.is_empty() {
+            ui.label(RichText::new(&node.description).size(10.5).color(TEXT));
+        }
+        ui.label(
+            RichText::new(format!(
+                "状态：{} · 中转：{} · 来源：{}",
+                if node.online { "在线" } else { "离线" },
+                if node.can_relay { "支持" } else { "不支持" },
+                if node.official { "官方" } else { "社区" }
+            ))
+            .size(10.0)
+            .color(DIM),
+        );
     });
+    ui.add_space(5.0);
 }
 
 fn is_public_peer(p: &service::Peer) -> bool {
@@ -918,70 +1201,132 @@ impl App {
             let mut cancel = false;
             {
                 let dlg = self.new_dialog.as_mut().expect("checked");
-                egui::Window::new("新建网络实例")
+                modal_scrim(ctx, "scrim-new-instance");
+                egui::Window::new("##new-instance-dialog")
+                    .title_bar(false)
                     .collapsible(false)
                     .resizable(false)
                     .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                    .order(egui::Order::Foreground)
+                    .frame(glass_window_frame(ctx))
                     .show(ctx, |ui| {
-                        ui.set_width(360.0);
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("实例名称").size(11.5).color(MUTED));
-                        ui.add_sized(
-                            [ui.available_width(), 28.0],
-                            egui::TextEdit::singleline(&mut dlg.name)
-                                .hint_text("例如：home-net"),
+                        ui.set_width(430.0);
+                        modal_header(
+                            ui,
+                            "新建网络实例",
+                            "写入本地配置 · 创建后不会自动启动",
+                            &mut cancel,
                         );
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("网络密钥（可留空）").size(11.5).color(MUTED));
-                        ui.add_sized(
-                            [ui.available_width(), 28.0],
-                            egui::TextEdit::singleline(&mut dlg.secret)
-                                .password(true)
-                                .hint_text("用于验证节点归属"),
-                        );
-                        ui.add_space(10.0);
-                        ui.label(RichText::new("组网方式").size(11.5).color(MUTED));
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(&mut dlg.method, 2, "独立网络");
-                            ui.selectable_value(&mut dlg.method, 1, "指定节点");
+                        glass_section(ui, "基本信息", |ui| {
+                            field_label(ui, "实例名称");
+                            text_input(ui, &mut dlg.name, "例如：home-net", false);
+                            ui.add_space(8.0);
+                            field_label(ui, "网络密钥（可留空）");
+                            text_input(ui, &mut dlg.secret, "用于验证节点归属", true);
                         });
-                        if dlg.method == 2 {
+                        glass_section(ui, "组网方式", |ui| {
+                            ui.horizontal(|ui| {
+                                let half = (ui.available_width() - 24.0) / 2.0;
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(half, 52.0),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        if method_card(
+                                            ui,
+                                            dlg.method == 2,
+                                            "独立网络",
+                                            "本机作为根节点监听",
+                                        ) {
+                                            dlg.method = 2;
+                                        }
+                                    },
+                                );
+                                ui.add_space(8.0);
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(half, 52.0),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        if method_card(
+                                            ui,
+                                            dlg.method == 1,
+                                            "指定节点",
+                                            "加入现有网络",
+                                        ) {
+                                            dlg.method = 1;
+                                        }
+                                    },
+                                );
+                            });
+                            ui.add_space(6.0);
                             ui.label(
-                                RichText::new("本机作为根节点监听，其他节点通过监听地址加入。")
-                                    .size(10.5)
-                                    .color(DIM),
-                            );
-                        } else {
-                            ui.label(
-                                RichText::new("创建后可在配置页填写对等节点地址。")
-                                    .size(10.5)
-                                    .color(DIM),
-                            );
-                        }
-                        ui.add_space(10.0);
-                        ui.horizontal(|ui| {
-                            if switch(ui, dlg.dhcp) {
-                                dlg.dhcp = !dlg.dhcp;
-                            }
-                            ui.label(
-                                RichText::new("DHCP 自动分配虚拟 IP")
-                                    .size(11.5)
-                                    .color(MUTED),
+                                RichText::new(if dlg.method == 2 {
+                                    "创建后会生成监听地址，其他节点加入时填写该地址。"
+                                } else {
+                                    "创建后请在「配置」页填写至少一个对等节点地址。"
+                                })
+                                .size(10.0)
+                                .color(DIM),
                             );
                         });
-                        ui.add_space(14.0);
+                        glass_section(ui, "虚拟 IP", |ui| {
+                            ui.horizontal(|ui| {
+                                if switch(ui, dlg.dhcp) {
+                                    dlg.dhcp = !dlg.dhcp;
+                                }
+                                ui.label(
+                                    RichText::new("DHCP 自动分配").size(12.0).color(TEXT),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            RichText::new(if dlg.dhcp {
+                                                "推荐"
+                                            } else {
+                                                "固定地址"
+                                            })
+                                            .size(10.0)
+                                            .color(if dlg.dhcp { OK } else { DIM }),
+                                        );
+                                    },
+                                );
+                            });
+                            ui.add_space(3.0);
+                            ui.label(
+                                RichText::new(if dlg.dhcp {
+                                    "由网络中的 DHCP 服务自动分配虚拟 IP。"
+                                } else {
+                                    "关闭后需在创建后的配置页填写固定虚拟 IP。"
+                                })
+                                .size(10.0)
+                                .color(DIM),
+                            );
+                        });
                         ui.horizontal(|ui| {
-                            if ui
-                                .add(egui::Button::new(
-                                    RichText::new("创建").color(Color32::WHITE),
-                                ).fill(ACCENT))
-                                .clicked()
-                            {
-                                create = true;
-                            }
-                            if ui.button("取消").clicked() {
+                            let ghost = egui::Button::new(
+                                RichText::new("取消").size(12.0).color(MUTED),
+                            )
+                            .frame(false);
+                            if ui.add(ghost).clicked() {
                                 cancel = true;
                             }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let btn = egui::Button::new(
+                                        RichText::new("创建实例")
+                                            .size(12.5)
+                                            .color(Color32::WHITE),
+                                    )
+                                    .fill(ACCENT)
+                                    .stroke(Stroke::NONE)
+                                    .corner_radius(CornerRadius::same(8))
+                                    .min_size(Vec2::new(96.0, 30.0));
+                                    if ui.add(btn).clicked() {
+                                        create = true;
+                                    }
+                                },
+                            );
                         });
                     });
             }
@@ -995,33 +1340,53 @@ impl App {
         if let Some((_id, name)) = self.confirm_delete.clone() {
             let mut confirmed = false;
             let mut cancel = false;
-            egui::Window::new("删除网络实例")
+            modal_scrim(ctx, "scrim-delete-instance");
+            egui::Window::new("##delete-instance-dialog")
+                .title_bar(false)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .order(egui::Order::Foreground)
+                .frame(glass_window_frame(ctx))
                 .show(ctx, |ui| {
-                    ui.set_width(340.0);
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(format!("确定要删除网络实例「{name}」吗？")).size(12.5));
+                    ui.set_width(380.0);
+                    modal_header(ui, "删除网络实例", "该操作不可撤销", &mut cancel);
                     ui.label(
-                        RichText::new("该实例的本地配置将被移除，若网络正在运行将先自动断开。")
+                        RichText::new(format!("确定要删除「{name}」吗？"))
+                            .size(12.5)
+                            .color(TEXT),
+                    );
+                    ui.label(
+                        RichText::new("本地配置会被移除；若网络正在运行将先自动断开。")
                             .size(10.5)
                             .color(DIM),
                     );
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new("删除").color(Color32::WHITE))
-                                    .fill(ERR.gamma_multiply(0.75)),
-                            )
-                            .clicked()
-                        {
-                            confirmed = true;
-                        }
-                        if ui.button("取消").clicked() {
+                        let ghost = egui::Button::new(
+                            RichText::new("取消").size(12.0).color(MUTED),
+                        )
+                        .frame(false);
+                        if ui.add(ghost).clicked() {
                             cancel = true;
                         }
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                let btn = egui::Button::new(
+                                    RichText::new("删除")
+                                        .size(12.5)
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(ERR.gamma_multiply(0.75))
+                                .stroke(Stroke::NONE)
+                                .corner_radius(CornerRadius::same(8))
+                                .min_size(Vec2::new(88.0, 30.0));
+                                if ui.add(btn).clicked() {
+                                    confirmed = true;
+                                }
+                            },
+                        );
                     });
                 });
             if confirmed {
@@ -1049,36 +1414,66 @@ impl App {
                         }
                     }
                 }
-                egui::Window::new("添加公共节点")
+                modal_scrim(ctx, "scrim-public-picker");
+                egui::Window::new("##public-node-picker")
+                    .title_bar(false)
                     .collapsible(false)
                     .resizable(false)
                     .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                    .order(egui::Order::Foreground)
+                    .frame(glass_window_frame(ctx))
                     .show(ctx, |ui| {
-                        ui.set_width(560.0);
+                        ui.set_width(600.0);
+                        let subtitle = if picker.nodes.is_empty() {
+                            "社区公共节点 · 延迟为本地 TCP 实测 · 可用率取近 24 小时".to_owned()
+                        } else {
+                            format!(
+                                "社区公共节点 · 共 {} 个 · 延迟为本地 TCP 实测 · 可用率取近 24 小时",
+                                picker.nodes.len()
+                            )
+                        };
+                        modal_header(ui, "添加公共节点", &subtitle, &mut close);
                         ui.horizontal(|ui| {
-                            ui.add_sized(
-                                [260.0, 26.0],
-                                egui::TextEdit::singleline(&mut picker.query)
-                                    .hint_text("搜索节点名称 / 地址"),
+                            let btn_w = 82.0;
+                            let spinner_w = if picker.rx.is_some() { 22.0 } else { 0.0 };
+                            let field_w =
+                                (ui.available_width() - btn_w - spinner_w - 20.0).max(140.0);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(field_w, 30.0),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    text_input(ui, &mut picker.query, "搜索名称 / 地址", false);
+                                },
                             );
-                            if ui.button("刷新").clicked() {
+                            let btn =
+                                egui::Button::new(RichText::new("刷新列表").size(11.0).color(MUTED))
+                                    .fill(Color32::from_white_alpha(6))
+                                    .stroke(Stroke::new(1.0, BORDER))
+                                    .corner_radius(CornerRadius::same(8))
+                                    .min_size(Vec2::new(btn_w, 30.0));
+                            if ui.add(btn).clicked() {
                                 refresh = true;
                             }
                             if picker.rx.is_some() {
                                 ui.spinner();
-                                ui.label(RichText::new("正在拉取并测速…").size(10.5).color(DIM));
                             }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.button("关闭").clicked() {
-                                        close = true;
-                                    }
-                                },
-                            );
                         });
+                        if picker.rx.is_some() {
+                            ui.add_space(2.0);
+                            ui.label(
+                                RichText::new("正在拉取社区状态页并测速…")
+                                    .size(10.0)
+                                    .color(DIM),
+                            );
+                        }
                         if let Some(err) = &picker.error {
-                            ui.label(RichText::new(format!("拉取失败：{err}")).size(10.5).color(WARN));
+                            ui.add_space(2.0);
+                            let msg = if picker.nodes.is_empty() {
+                                format!("拉取失败：{err}")
+                            } else {
+                                format!("拉取失败：{err}（已显示内置备用节点）")
+                            };
+                            ui.label(RichText::new(msg).size(10.0).color(WARN));
                         }
                         ui.add_space(6.0);
                         let q = picker.query.trim().to_lowercase();
@@ -1093,30 +1488,51 @@ impl App {
                             })
                             .map(|(i, _)| i)
                             .collect();
+                        let domestic = filtered
+                            .iter()
+                            .filter(|&&i| !picker.nodes[i].overseas)
+                            .count();
+                        let overseas = filtered.len() - domestic;
                         if picker.nodes.is_empty() && picker.rx.is_none() && picker.error.is_none() {
                             ui.label(RichText::new("暂无节点列表").size(11.0).color(DIM));
+                        } else if filtered.is_empty() && picker.rx.is_none() {
+                            ui.label(RichText::new("没有匹配的节点").size(11.0).color(DIM));
                         }
                         ScrollArea::vertical()
                             .id_salt("public-node-list")
-                            .max_height(360.0)
+                            .max_height(430.0)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
                                 for section in [false, true] {
-                                    let label = if section { "海外节点" } else { "国内节点" };
-                                    let mut section_nodes = filtered
-                                        .iter()
-                                        .map(|&i| &picker.nodes[i])
-                                        .filter(|n| n.overseas == section);
-                                    let first = section_nodes.next();
-                                    let Some(first) = first else { continue };
-                                    ui.add_space(4.0);
-                                    ui.label(RichText::new(label).size(11.0).color(DIM));
-                                    render_public_node(ui, first, &self.config.peer_urls, &mut add_addr);
-                                    for node in section_nodes {
-                                        render_public_node(ui, node, &self.config.peer_urls, &mut add_addr);
+                                    let (label, count, accent) = if section {
+                                        ("海外节点", overseas, RX)
+                                    } else {
+                                        ("国内节点", domestic, OK)
+                                    };
+                                    if count == 0 {
+                                        continue;
                                     }
+                                    group_header(ui, label, count, accent);
+                                    for &i in
+                                        filtered.iter().filter(|&&i| picker.nodes[i].overseas == section)
+                                    {
+                                        public_node_card(
+                                            ui,
+                                            &picker.nodes[i],
+                                            &self.config.peer_urls,
+                                            &mut add_addr,
+                                        );
+                                    }
+                                    ui.add_space(4.0);
                                 }
                             });
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new("点击「添加」写入对等节点列表，保存配置后生效。")
+                                .size(9.5)
+                                .color(DIM),
+                        );
                     });
             }
             if refresh {
